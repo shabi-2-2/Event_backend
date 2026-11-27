@@ -832,6 +832,54 @@ export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
 python -m pytest -q
 ```
 
+## Monorepo layout (Phase 8 setup)
+
+The existing Git repository now contains both applications; there is no separate
+frontend repository and no nested Git repository under `frontend/`.
+
+```text
+Event_backend/
+├── app/                 # FastAPI application
+├── alembic/             # Backend migrations
+├── tests/               # Backend tests
+├── pyproject.toml
+├── alembic.ini
+├── README.md
+├── frontend/            # Next.js application
+│   ├── src/
+│   ├── public/
+│   ├── package.json
+│   ├── next.config.ts
+│   └── .env.example
+├── .gitignore
+└── .env.example
+```
+
+Backend files stay at the repository root. The frontend is independently
+buildable from `frontend/`; copy `frontend/.env.example` to
+`frontend/.env.local` and fill in real values locally. Do not commit `.env.local`.
+
+```bash
+cd frontend
+npm install
+npm run dev
+npm run build
+```
+
+### Deployment configuration
+
+No deployment is performed by this setup step. When Phase 8 is ready to deploy:
+
+| Platform / service | Root Directory | Notes |
+|---|---|---|
+| Vercel (Next.js frontend) | `frontend/` | Build command `npm run build`; install from `frontend/package-lock.json` |
+| Render (FastAPI API) | `.` | Uses root `pyproject.toml`, `app/`, and `alembic/` |
+| Render (email worker) | `.` | Uses the same root working directory and environment as the API |
+
+Because both Render services use the repository root, backend commands and
+Alembic migrations must be run from `.`, while Vercel build commands must be run
+from `frontend/`.
+
 ## Local setup
 
 Requires Python 3.12 or 3.13.
