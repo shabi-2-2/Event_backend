@@ -1,12 +1,25 @@
 import type {
   AnalyticsDateRangeParams,
   AttendanceAnalyticsResponse,
+  AttendeeListParams,
+  AttendeeRecord,
   EmailAnalyticsResponse,
+  EventCreateRequest,
   EventRecord,
+  EventUpdateRequest,
   ListEventsParams,
   OverviewAnalyticsResponse,
   Page,
   RegistrationAnalyticsResponse,
+  RegistrationListParams,
+  RegistrationRecord,
+  StaffCreateRequest,
+  StaffListParams,
+  StaffRecord,
+  StaffRoleUpdateRequest,
+  TicketListParams,
+  TicketRecord,
+  TicketResendResponse,
 } from "@/lib/api/contracts";
 import { ApiError } from "@/lib/api/errors";
 import { getApiBaseUrl } from "@/lib/env";
@@ -120,6 +133,36 @@ export class ApiClient {
         path: `/admin/events/${encodeURIComponent(slug)}`,
         signal,
       }),
+
+    create: (body: EventCreateRequest, signal?: AbortSignal) =>
+      this.request<EventRecord>({
+        method: "POST",
+        path: "/admin/events",
+        body,
+        signal,
+      }),
+
+    update: (slug: string, body: EventUpdateRequest, signal?: AbortSignal) =>
+      this.request<EventRecord>({
+        method: "PATCH",
+        path: `/admin/events/${encodeURIComponent(slug)}`,
+        body,
+        signal,
+      }),
+
+    publish: (slug: string, signal?: AbortSignal) =>
+      this.request<EventRecord>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/publish`,
+        signal,
+      }),
+
+    archive: (slug: string, signal?: AbortSignal) =>
+      this.request<EventRecord>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/archive`,
+        signal,
+      }),
   };
 
   readonly analytics = {
@@ -164,6 +207,109 @@ export class ApiClient {
       this.request<EmailAnalyticsResponse>({
         method: "GET",
         path: `/admin/events/${encodeURIComponent(slug)}/analytics/email-deliveries`,
+        signal,
+      }),
+  };
+
+  readonly attendees = {
+    list: (slug: string, params: AttendeeListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<AttendeeRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/attendees`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+
+    get: (slug: string, attendeeReference: string, signal?: AbortSignal) =>
+      this.request<AttendeeRecord>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/attendees/${encodeURIComponent(attendeeReference)}`,
+        signal,
+      }),
+  };
+
+  readonly registrations = {
+    list: (slug: string, params: RegistrationListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<RegistrationRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/registrations`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+
+    get: (slug: string, registrationReference: string, signal?: AbortSignal) =>
+      this.request<RegistrationRecord>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/registrations/${encodeURIComponent(registrationReference)}`,
+        signal,
+      }),
+
+    cancel: (slug: string, registrationReference: string, signal?: AbortSignal) =>
+      this.request<RegistrationRecord>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/registrations/${encodeURIComponent(registrationReference)}/cancel`,
+        signal,
+      }),
+  };
+
+  readonly tickets = {
+    list: (slug: string, params: TicketListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<TicketRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/tickets`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+
+    revoke: (slug: string, ticketReference: string, signal?: AbortSignal) =>
+      this.request<TicketRecord>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/tickets/${encodeURIComponent(ticketReference)}/revoke`,
+        signal,
+      }),
+
+    resend: (slug: string, ticketReference: string, signal?: AbortSignal) =>
+      this.request<TicketResendResponse>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/tickets/${encodeURIComponent(ticketReference)}/resend`,
+        signal,
+      }),
+  };
+
+  readonly staff = {
+    list: (slug: string, params: StaffListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<StaffRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/staff`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+
+    create: (slug: string, body: StaffCreateRequest, signal?: AbortSignal) =>
+      this.request<StaffRecord>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/staff`,
+        body,
+        signal,
+      }),
+
+    updateRole: (
+      slug: string,
+      userId: string,
+      body: StaffRoleUpdateRequest,
+      signal?: AbortSignal,
+    ) =>
+      this.request<StaffRecord>({
+        method: "PATCH",
+        path: `/admin/events/${encodeURIComponent(slug)}/staff/${encodeURIComponent(userId)}`,
+        body,
+        signal,
+      }),
+
+    remove: (slug: string, userId: string, signal?: AbortSignal) =>
+      this.request<void>({
+        method: "DELETE",
+        path: `/admin/events/${encodeURIComponent(slug)}/staff/${encodeURIComponent(userId)}`,
         signal,
       }),
   };

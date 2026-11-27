@@ -117,3 +117,143 @@ export type EmailAnalyticsResponse = {
   status_counts: EmailDeliveryStatusCounts;
   attempt_summary: EmailAttemptSummary;
 };
+
+/** Backend filter name is `CheckinFilterStatus`; the existing union is identical. */
+export type CheckinFilterStatus = CheckinStatus;
+
+/** Exact writable fields from `EventCreate`. */
+export type EventCreateRequest = {
+  slug: string;
+  name: string;
+  description?: string | null;
+  starts_at: string;
+  ends_at: string;
+  timezone: string;
+  venue?: string | null;
+  capacity?: number | null;
+  registration_opens_at?: string | null;
+  registration_closes_at?: string | null;
+};
+
+/** Exact writable fields from `EventUpdate`. `slug` and `status` are forbidden. */
+export type EventUpdateRequest = {
+  name?: string;
+  description?: string | null;
+  starts_at?: string;
+  ends_at?: string;
+  timezone?: string;
+  venue?: string | null;
+  capacity?: number | null;
+  registration_opens_at?: string | null;
+  registration_closes_at?: string | null;
+};
+
+export type AttendeeListParams = PaginationParams & {
+  search?: string;
+  urn?: string;
+  email?: string;
+  registration_status?: RegistrationStatus;
+  ticket_status?: TicketStatus;
+  check_in_status?: CheckinFilterStatus;
+  sort_by?: AttendeeSortField;
+  sort_order?: SortOrder;
+};
+
+type AttendeeBaseRecord = {
+  attendee_reference: string;
+  full_name: string;
+  urn: string;
+  registration_status: RegistrationStatus;
+  ticket_status: TicketStatus | null;
+  check_in_status: CheckinFilterStatus;
+  checked_in_at: string | null;
+};
+
+/** Exact fields from `AdminAttendeeResponse`. */
+export type AdminAttendeeRecord = AttendeeBaseRecord & {
+  email: string;
+  phone: string | null;
+  registration_reference: string;
+  registered_at: string;
+  cancelled_at: string | null;
+  ticket_reference: string | null;
+  ticket_expires_at: string | null;
+  ticket_used_at: string | null;
+  check_in_at: string | null;
+  station: string | null;
+};
+
+/** Exact fields from `ViewerAttendeeResponse`. */
+export type ViewerAttendeeRecord = AttendeeBaseRecord;
+
+export type AttendeeRecord = AdminAttendeeRecord | ViewerAttendeeRecord;
+
+export type RegistrationListParams = PaginationParams & {
+  reference?: string;
+  name?: string;
+  email?: string;
+  registration_status?: RegistrationStatus;
+  ticket_status?: TicketStatus;
+  check_in_status?: CheckinFilterStatus;
+};
+
+/** Exact fields from `RegistrationResponse`. */
+export type RegistrationRecord = {
+  registration_reference: string;
+  attendee_reference: string;
+  attendee_name: string;
+  email: string;
+  phone: string | null;
+  registration_status: RegistrationStatus;
+  registered_at: string;
+  checked_in_at: string | null;
+  cancelled_at: string | null;
+  ticket_reference: string | null;
+  ticket_status: TicketStatus | null;
+  check_in_status: CheckinFilterStatus;
+  check_in_at: string | null;
+  station: string | null;
+};
+
+export type TicketListParams = PaginationParams & {
+  ticket_status?: TicketStatus;
+  reference?: string;
+};
+
+/** Exact fields from `TicketResponse`; secrets are never returned. */
+export type TicketRecord = {
+  ticket_reference: string;
+  attendee_reference: string;
+  attendee_name: string;
+  registration_status: RegistrationStatus;
+  ticket_status: TicketStatus;
+  issued_at: string;
+  expires_at: string | null;
+  used_at: string | null;
+  revoked_at: string | null;
+  check_in_at: string | null;
+};
+
+/** Exact fields from `TicketResendResponse`. */
+export type TicketResendResponse = {
+  ticket_reference: string;
+  delivery_reference: string;
+  status: EmailDeliveryStatus;
+  resend_sequence: number;
+  message: string;
+};
+
+export type StaffListParams = PaginationParams & {
+  role?: StaffRole;
+};
+
+/** Exact fields from `StaffCreateRequest`. */
+export type StaffCreateRequest = {
+  user_id: string;
+  role: StaffRole;
+};
+
+/** Exact fields from `StaffRoleUpdate`. */
+export type StaffRoleUpdateRequest = {
+  role: StaffRole;
+};
