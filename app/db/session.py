@@ -32,6 +32,9 @@ def create_db_engine(settings: Settings) -> Engine:
     connect_args: dict[str, Any] = {
         "options": f"-c statement_timeout={settings.db_statement_timeout_ms}"
     }
+    if settings.db_prepare_threshold is not None:
+        # Supabase transaction pooling does not support named prepared statements.
+        connect_args["prepare_threshold"] = settings.db_prepare_threshold
     return create_engine(
         url,
         pool_size=settings.db_pool_size,

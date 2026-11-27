@@ -6,6 +6,7 @@ from logging.config import fileConfig
 
 from alembic import context
 
+import app.db.models  # noqa: E402,F401  # register all mapped classes
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import create_db_engine

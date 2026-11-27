@@ -17,8 +17,25 @@ Implemented:
 - Alembic initialisation (no domain migrations yet)
 - Basic CI, linting, type-checking, and test configuration
 
-Not implemented yet: registration, ticket generation, email delivery, scanner APIs,
-admin workflows, and database models.
+Not implemented yet: registration webhooks, ticket generation, email delivery,
+scanner APIs, admin workflows, and Supabase JWT authentication. Database models
+were added in Phase 2.
+
+## Phase 2 scope
+
+Implemented:
+
+- SQLAlchemy 2.x models for events, attendees, registrations, tickets, check-ins,
+  email outbox, webhook ledger, staff memberships, and audit logs
+- UUID primary keys, UTC timestamps, PostgreSQL native enums, and JSONB metadata
+- Global normalized URN/email uniqueness plus domain-specific unique constraints
+- `RESTRICT` foreign keys; no cascading deletes of historical records
+- Initial Alembic revision `20261127_0001`
+- psycopg v3 pooling with Supabase transaction-pooling compatibility
+- Portable SQLite model tests and isolated PostgreSQL schema/migration tests
+
+Not implemented yet: registration webhook endpoints, HMAC authentication, QR
+generation, email sending/worker, check-in API, admin APIs, and Supabase JWT auth.
 
 ## Local setup
 
@@ -67,28 +84,53 @@ All variables use the `EVENT_` prefix and are validated at startup.
 | `EVENT_DB_POOL_TIMEOUT_SECONDS` | No | `30` | Pool checkout timeout |
 | `EVENT_DB_POOL_RECYCLE_SECONDS` | No | `1800` | Connection recycle age |
 | `EVENT_DB_STATEMENT_TIMEOUT_MS` | No | `30000` | Per-statement timeout |
+| `EVENT_DB_PREPARE_THRESHOLD` | No | `0` | psycopg v3 prepared statements; `0` for transaction pooling |
 | `EVENT_DB_ECHO` | No | `false` | SQL echo; never enable in production |
 
 ## Database / Alembic
 
-Alembic is initialised but no migration revisions exist yet.
+All mapped classes are registered through `app.db.models`. Alembic reads the same
+`EVENT_DATABASE_URL` setting as the application.
 
 ```bash
+# Apply the initial schema
 alembic upgrade head
+
+# Verify the database matches the model metadata
+alembic check
+
+# Initial revision only: drops all domain tables and native enum types
+alembic downgrade base
 ```
 
-Domain models and the first migration arrive in Phase 2.
+Revision `20261127_0001` creates all nine domain tables, their native enums,
+foreign keys, unique constraints, and indexes. Only hashed ticket tokens and
+webhook payload hashes are stored; raw ticket tokens and raw webhook payloads are
+never persisted.
 
 ## Tests and quality checks
 
 ```bash
+# Portable tests (no PostgreSQL required)
+pytest -q -m 'not postgres'
+
+# Full suite, including PostgreSQL-specific schema and migration tests
+export EVENT_APP_ENV=test
+export EVENT_DATABASE_URL='postgresql+psycopg://.../event_test'
+export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
 pytest -q
+
 ruff check .
 ruff format --check .
 mypy app
 ```
 
-CI runs the same checks on Python 3.12.
+PostgreSQL tests require an isolated database whose URL contains `test`.
+`EVENT_TEST_POSTGRES_URL` must equal `EVENT_DATABASE_URL` so Alembic verifies the
+same database. The fixtures reset the `public` schema before applying migrations;
+never point these variables at production or staging.
+
+CI runs the portable checks on Python 3.12.
 
 ## Response formats
 

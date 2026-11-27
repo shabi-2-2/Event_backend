@@ -36,6 +36,9 @@ exclude = ["tests*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+  "postgres: requires EVENT_TEST_POSTGRES_URL pointing to an isolated test database",
+]
 
 [tool.ruff]
 line-length = 100

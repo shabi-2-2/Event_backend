@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     db_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
     db_pool_recycle_seconds: int = Field(default=1800, ge=0)
     db_statement_timeout_ms: int = Field(default=30_000, ge=1_000)
+    db_prepare_threshold: int | None = Field(default=0, ge=0)
     db_echo: bool = False
 
     @field_validator("service_name", "app_version", mode="before")
