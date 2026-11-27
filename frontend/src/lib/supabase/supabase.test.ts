@@ -67,14 +67,19 @@ describe("Supabase clients", () => {
     const options = createServerClientMock.mock.calls[0][2] as {
       cookies: {
         getAll: () => unknown[];
-        setAll: (values: Array<{ name: string; value: string }>) => void;
+        setAll: (
+          values: Array<{ name: string; value: string; options?: object }>,
+        ) => void;
       };
     };
 
     expect(options.cookies.getAll()).toEqual([
       { name: "sb-token", value: "cookie-value" },
     ]);
-    options.cookies.setAll([{ name: "sb-token", value: "refreshed" }]);
-    expect(cookieStore.set).toHaveBeenCalledWith("sb-token", "refreshed", undefined);
+    const cookieOptions = { path: "/", sameSite: "lax" as const };
+    options.cookies.setAll([
+      { name: "sb-token", value: "refreshed", options: cookieOptions },
+    ]);
+    expect(cookieStore.set).toHaveBeenCalledWith("sb-token", "refreshed", cookieOptions);
   });
 });

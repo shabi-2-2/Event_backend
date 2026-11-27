@@ -37,8 +37,13 @@ export default async function DashboardLayout({ children }: { children: ReactNod
       await api.events.list({ page: 1, page_size: 1 });
       canManageEvents = true;
     } catch (caught) {
+      // A backend 401 does not invalidate a Supabase session that getUser()
+      // has just verified. Redirecting here would bounce an authenticated user
+      // back to /login, which immediately redirects to the dashboard again.
+      // The backend remains authoritative for RBAC: keep management navigation
+      // closed and let individual API errors surface in the consuming views.
       if (caught instanceof ApiError && caught.isUnauthorized) {
-        redirect("/login?reason=session_expired&next=%2Fdashboard");
+        canManageEvents = false;
       }
     }
   }

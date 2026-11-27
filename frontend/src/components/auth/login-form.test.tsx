@@ -27,7 +27,10 @@ describe("LoginForm", () => {
   });
 
   it("submits credentials and navigates to the requested page", async () => {
-    signInWithPassword.mockResolvedValueOnce({ error: null });
+    signInWithPassword.mockResolvedValueOnce({
+      data: { user: { id: "user-1" }, session: { expires_in: 3600 } },
+      error: null,
+    });
 
     const { LoginForm } = await import("@/components/auth/login-form");
     render(<LoginForm configured next="/events?event=demo" />);
