@@ -14,5 +14,8 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     clearMocks: true,
     css: false,
+    env: {
+      TZ: "UTC",
+    },
   },
 });

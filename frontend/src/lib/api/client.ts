@@ -1,4 +1,13 @@
-import type { Page, ListEventsParams, EventRecord } from "@/lib/api/contracts";
+import type {
+  AnalyticsDateRangeParams,
+  AttendanceAnalyticsResponse,
+  EmailAnalyticsResponse,
+  EventRecord,
+  ListEventsParams,
+  OverviewAnalyticsResponse,
+  Page,
+  RegistrationAnalyticsResponse,
+} from "@/lib/api/contracts";
 import { ApiError } from "@/lib/api/errors";
 import { getApiBaseUrl } from "@/lib/env";
 
@@ -109,6 +118,52 @@ export class ApiClient {
       this.request<EventRecord>({
         method: "GET",
         path: `/admin/events/${encodeURIComponent(slug)}`,
+        signal,
+      }),
+  };
+
+  readonly analytics = {
+    overview: (slug: string, signal?: AbortSignal) =>
+      this.request<OverviewAnalyticsResponse>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/analytics/overview`,
+        signal,
+      }),
+
+    registrations: (
+      slug: string,
+      range: AnalyticsDateRangeParams = {},
+      signal?: AbortSignal,
+    ) =>
+      this.request<RegistrationAnalyticsResponse>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/analytics/registrations`,
+        query: {
+          from_date: range.from_date,
+          to_date: range.to_date,
+        },
+        signal,
+      }),
+
+    attendance: (
+      slug: string,
+      range: AnalyticsDateRangeParams = {},
+      signal?: AbortSignal,
+    ) =>
+      this.request<AttendanceAnalyticsResponse>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/analytics/attendance`,
+        query: {
+          from_date: range.from_date,
+          to_date: range.to_date,
+        },
+        signal,
+      }),
+
+    emailDeliveries: (slug: string, signal?: AbortSignal) =>
+      this.request<EmailAnalyticsResponse>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/analytics/email-deliveries`,
         signal,
       }),
   };
