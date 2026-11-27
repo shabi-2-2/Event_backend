@@ -17,10 +17,10 @@ Implemented:
 - Alembic initialisation (no domain migrations yet)
 - Basic CI, linting, type-checking, and test configuration
 
-Not implemented yet: scanner APIs, admin workflows, and login endpoints. Ticket
-issuance and email delivery were added in Phase 5; the registration webhook was
-added in Phase 4; JWT verification primitives were added in Phase 3; database
-models were added in Phase 2.
+Not implemented yet: admin workflows and login endpoints. Scanner APIs were added
+in Phase 6; ticket issuance and email delivery were added in Phase 5; the
+registration webhook was added in Phase 4; JWT verification primitives were added
+in Phase 3; database models were added in Phase 2.
 
 ## Phase 2 scope
 
@@ -35,9 +35,10 @@ Implemented:
 - psycopg v3 pooling with Supabase transaction-pooling compatibility
 - Portable SQLite model tests and isolated PostgreSQL schema/migration tests
 
-Not implemented yet: check-in API and admin APIs. QR generation, email sending,
-and the worker were added in Phase 5; the HMAC-authenticated registration webhook
-was added in Phase 4; security primitives were added in Phase 3.
+Not implemented yet: admin APIs. The check-in API was added in Phase 6; QR
+generation, email sending, and the worker were added in Phase 5; the
+HMAC-authenticated registration webhook was added in Phase 4; security primitives
+were added in Phase 3.
 
 ## Phase 3 scope
 
@@ -49,8 +50,9 @@ Implemented as reusable primitives only (no product endpoints):
 - Secure ticket-token generation, SHA-256 hashing, and constant-time comparison
 - Shared PostgreSQL fixed-window rate limiting for webhook, check-in, and export scopes
 
-Not implemented yet: login endpoints, scanner API, and admin API endpoints. QR
-generation, Resend integration, and the email worker were added in Phase 5.
+Not implemented yet: login endpoints and admin API endpoints. Scanner endpoints
+were added in Phase 6; QR generation, Resend integration, and the email worker
+were added in Phase 5.
 
 ## Phase 4 scope
 
@@ -62,8 +64,9 @@ Implemented:
 - Idempotent processing backed by the existing `webhook_events` ledger and database constraints
 - Controlled outcomes for registered, declined, duplicate, already registered, validation rejection, event unavailable, capacity reached, and identity conflict
 
-Ticket generation, QR codes, and email delivery were added in Phase 5. Still not
-implemented: scanner endpoints, admin endpoints, and automatic event creation.
+Ticket generation, QR codes, and email delivery were added in Phase 5; scanner
+endpoints were added in Phase 6. Still not implemented: admin endpoints and
+automatic event creation.
 
 ### Google Forms webhook contract
 
@@ -178,9 +181,10 @@ Implemented:
 - Exponential backoff, bounded retries, dead-letter status, and structured PII-free logs
 - Professional responsive HTML ticket email with an inline QR attachment
 
-Not implemented yet: scanner endpoints, frontend scanner, admin dashboard, deployment,
-and any Phase 6 functionality. No migration was required for Phase 5: the existing
-`tickets`, `email_deliveries`, and webhook-ledger constraints cover the workflow.
+Not implemented yet: frontend scanner, admin dashboard, deployment, and any Phase 7
+functionality. The backend scanner API was added in Phase 6. No migration was
+required for Phase 5: the existing `tickets`, `email_deliveries`, and webhook-ledger
+constraints cover the workflow.
 
 ### Ticket issuance architecture
 
@@ -285,6 +289,184 @@ After the configured maximum attempts, the row becomes `dead_letter` and is no l
 retried automatically. Success sets `status=sent`, `provider_message_id`, and `sent_at`.
 Logs contain delivery IDs, attempts, outcomes, and safe error codes only — never
 recipient details, tokens, API keys, or provider error bodies.
+
+## Phase 6 scope
+
+Implemented:
+
+- `POST /api/v1/events/{event_slug}/checkins/verify`: read-only QR ticket verification
+- `POST /api/v1/events/{event_slug}/checkins/confirm`: atomic QR ticket check-in
+- Supabase JWT authentication with event-scoped `ticket.verify` / `ticket.checkin`
+  permissions resolved from `staff_memberships`, never from JWT role claims
+- Dedicated PostgreSQL-backed rate limits for verification and confirmation
+- Existing Phase 3 SHA-256 token hashing; raw tokens are never stored, returned, or logged
+- Explicit Pydantic request/response whitelists for scanner payloads
+- Controlled outcomes for all normal ticket, registration, and duplicate states
+- PostgreSQL row locking plus `uq_checkins_ticket_id` for duplicate/concurrency safety
+- Redacted success and denial audit records in the existing `audit_logs` table
+- Isolated PostgreSQL tests for transactions, locking, concurrency, auth, and privacy
+
+No migration was required for Phase 6. The existing `checkins`, `tickets`,
+`registrations`, and `audit_logs` tables and constraints already cover this workflow.
+
+### Check-in endpoint contracts
+
+| Endpoint | Required permission | Rate-limit scope | Database writes |
+|---|---|---|---|
+| `POST /api/v1/events/{event_slug}/checkins/verify` | `ticket.verify` | `checkin_verify` | None |
+| `POST /api/v1/events/{event_slug}/checkins/confirm` | `ticket.checkin` | `checkin_confirm` | Check-in, ticket, registration, audit log |
+
+Both endpoints require `Authorization: Bearer <supabase-jwt>`. The JWT verifier
+validates signature, issuer, audience, and expiry, then resolves the authenticated
+user ID only from verified claims. Authorization is a separate lookup against
+`staff_memberships` for the requested event slug. `checkin` and `admin` roles are
+allowed; `viewer` is denied. A token containing a fabricated `role` claim does not
+grant access. An unknown event slug or a user without event membership returns the
+standard `403 FORBIDDEN` envelope.
+
+Verification request:
+
+```json
+{
+  "ticket_token": "REPLACE_WITH_RAW_QR_TOKEN"
+}
+```
+
+Verification response for an eligible ticket (`200 OK`):
+
+```json
+{
+  "success": true,
+  "outcome": "valid_ticket",
+  "message": "Ticket verified.",
+  "ticket": {
+    "attendee_name": "Example Attendee",
+    "urn": "URN-EXAMPLE",
+    "ticket_status": "active",
+    "registration_status": "registered",
+    "check_in_status": "pending"
+  }
+}
+```
+
+Confirmation request:
+
+```json
+{
+  "ticket_token": "REPLACE_WITH_RAW_QR_TOKEN",
+  "station": "Main Gate"
+}
+```
+
+Confirmation response for a first check-in (`200 OK`):
+
+```json
+{
+  "success": true,
+  "outcome": "checked_in",
+  "message": "Check-in confirmed.",
+  "ticket": {
+    "attendee_name": "Example Attendee",
+    "urn": "URN-EXAMPLE",
+    "ticket_status": "used",
+    "registration_status": "checked_in",
+    "check_in_status": "checked_in"
+  }
+}
+```
+
+`station` is optional. When supplied it must be 1–100 characters, start with a
+letter or digit, and contain only letters, digits, spaces, `.`, `_`, `:`, or `-`.
+An empty or whitespace-only value is treated as absent. Invalid stations return the
+standard `422 VALIDATION_ERROR` envelope.
+
+### Scanner outcomes
+
+All domain outcomes below return `200 OK` with a predictable `success`, `outcome`,
+`message`, and optional whitelisted `ticket` object.
+
+| Outcome | `success` | Meaning |
+|---|---:|---|
+| `valid_ticket` | `true` | Verification only; ticket is eligible and no write occurred |
+| `checked_in` | `true` | First check-in was committed |
+| `already_checked_in` | `false` | Ticket was previously used; state and timestamp are unchanged |
+| `invalid_ticket` | `false` | Unknown token or ticket from another event; no ticket details returned |
+| `revoked_ticket` | `false` | Ticket status is `revoked` |
+| `expired_ticket` | `false` | Ticket has expired or is past `expires_at` |
+| `registration_cancelled` | `false` | Registration status is `cancelled` |
+| `invalid_registration_state` | `false` | Registration is not eligible for check-in |
+
+A cross-event token returns exactly the same response as an unknown token, with
+`"ticket": null`, so a scanner cannot learn whether the credential exists elsewhere.
+Authentication failures (`401`), authorization failures (`403`), validation failures
+(`422`), rate-limit failures (`429`), and unexpected database failures (`500`) use the
+standard error envelope and never echo submitted token values.
+
+Verification is strictly read-only: it does not mark tickets used, create check-ins,
+or write audit records. Confirmation is transactional: it resolves the token hash,
+locks the `Ticket` and `Registration` rows with `FOR UPDATE`, rechecks for an existing
+`Checkin`, creates the check-in, marks the ticket `used`, sets the registration to
+`checked_in`, and writes one success audit record. All four writes commit together or
+roll back together. `uq_checkins_ticket_id` is the final safeguard; two concurrent
+scanners produce exactly one `checked_in` response and one `already_checked_in`
+response. Database locks are released before the response is sent.
+
+Successful confirmations write `checkin.confirmed` audit records. Same-event denials
+write `checkin.denied` records. Invalid or cross-event tokens are not audited, because
+recording them would disclose that the credential was recognized. Audit context
+contains only the controlled outcome and the optional station; it never contains
+tokens, token hashes, emails, phone numbers, URNs, or other personal fields.
+
+### Scanner privacy rules
+
+Responses are built from explicit Pydantic models rather than ORM serialization.
+The only per-attendee fields returned are `attendee_name` and `urn`, plus ticket,
+registration, and check-in status. Responses never include email, phone, internal
+UUIDs, raw tokens, token hashes, SQL errors, or database metadata. Application logs
+contain event/user IDs, outcomes, and safe metadata only — never the submitted token
+or its SHA-256 digest.
+
+### Local API testing
+
+Start the API and use a real Supabase JWT plus a matching `staff_memberships` row for
+the event. There is no staff-management API in this phase, so local membership setup
+requires direct database access.
+
+```bash
+export SUPABASE_JWT='replace-with-a-supabase-jwt-for-a-staff-user'
+
+curl -X POST http://127.0.0.1:8000/api/v1/events/summer-social-2026/checkins/verify \
+  -H "Authorization: Bearer $SUPABASE_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_token":"REPLACE_WITH_RAW_QR_TOKEN"}'
+
+curl -X POST http://127.0.0.1:8000/api/v1/events/summer-social-2026/checkins/confirm \
+  -H "Authorization: Bearer $SUPABASE_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_token":"REPLACE_WITH_RAW_QR_TOKEN","station":"Main Gate"}'
+```
+
+The raw token is the exact QR payload. It is not stored in the database; for a local
+ticket you can recompute it in memory from its public `ticket_code` and the configured
+derivation key:
+
+```bash
+RAW_TOKEN="$(python -c 'from app.core.config import get_settings; from app.security.ticket_tokens import derive_ticket_token; print(derive_ticket_token("REPLACE_WITH_TICKET_CODE", get_settings().ticket_token_derivation_key_value()))')"
+```
+
+Do not paste real JWTs, raw tokens, or attendee data into source files, logs, or
+shared documentation. Rate-limit defaults are `EVENT_CHECKIN_VERIFY_RATE_LIMIT=120`
+and `EVENT_CHECKIN_CONFIRM_RATE_LIMIT=60` per `EVENT_RATE_LIMIT_WINDOW_SECONDS`
+(default 60), scoped by event and authenticated user.
+
+Run the PostgreSQL check-in tests with an isolated test database:
+
+```bash
+export EVENT_APP_ENV=test
+export EVENT_DATABASE_URL='postgresql+psycopg://postgres@127.0.0.1:55432/event_test'
+export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
+python -m pytest tests/test_checkin_api.py -q
+```
 
 ## Local setup
 

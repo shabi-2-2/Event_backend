@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.core.logging import get_logger, log_event
-from app.db.models import StaffMembership
+from app.db.models import Event, StaffMembership
 from app.db.models.common import StaffRole
 from app.db.session import get_session
 from app.security.exceptions import AuthorizationDenied
@@ -123,6 +123,46 @@ def require_permission(permission: Permission) -> Callable[..., Any]:
     ) -> EventAccess:
         try:
             event_id = _event_id_from_request(request)
+            access = authorize_event_access(session, user, event_id, permission)
+            if access is None:
+                raise AuthorizationDenied()
+        except AuthorizationDenied as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "rbac_denied",
+                reason=exc.reason,
+                permission=getattr(permission, "value", str(permission)),
+            )
+            raise AppError(
+                status_code=403,
+                code="FORBIDDEN",
+                message="You do not have access to this resource.",
+            ) from None
+        return access
+
+    return dependency
+
+
+def require_permission_by_slug(permission: Permission) -> Callable[..., Any]:
+    """Build an event-slug variant of :func:`require_permission`.
+
+    Unknown slugs are treated as authorization failures so the endpoint does not
+    disclose whether an event exists to a caller without event-scoped access.
+    """
+
+    async def dependency(
+        request: Request,
+        user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
+        session: Session = Depends(get_session),  # noqa: B008
+    ) -> EventAccess:
+        try:
+            raw_slug = request.path_params.get("event_slug")
+            if not isinstance(raw_slug, str) or not raw_slug.strip():
+                raise AuthorizationDenied("missing_event_slug")
+            event_id = session.scalar(select(Event.id).where(Event.slug == raw_slug.strip()))
+            if event_id is None:
+                raise AuthorizationDenied("event_unavailable")
             access = authorize_event_access(session, user, event_id, permission)
             if access is None:
                 raise AuthorizationDenied()
