@@ -9,6 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,8 +23,21 @@ os.environ.setdefault("EVENT_LOG_LEVEL", "INFO")
 os.environ.setdefault("EVENT_LOG_FORMAT", "json")
 os.environ.pop("EVENT_CORS_ORIGINS", None)
 os.environ.pop("EVENT_DOCS_ENABLED", None)
+for _security_var in (
+    "EVENT_WEBHOOK_SIGNING_KEYS",
+    "EVENT_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS",
+    "EVENT_SUPABASE_URL",
+    "EVENT_SUPABASE_JWT_STRATEGY",
+    "EVENT_SUPABASE_JWT_SECRET",
+    "EVENT_SUPABASE_JWKS_URL",
+    "EVENT_JWT_ISSUER",
+    "EVENT_JWT_AUDIENCE",
+    "EVENT_JWT_LEEWAY_SECONDS",
+):
+    os.environ.pop(_security_var, None)
 
 import app.db.models  # noqa: E402,F401  # register models on Base.metadata
+import app.security.rate_limit  # noqa: E402,F401  # register rate-limit table
 from app.core.config import Settings, get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import create_db_engine, create_session_factory  # noqa: E402
@@ -130,7 +144,7 @@ def postgres_engine_settings(settings: Settings) -> Settings:
     url = os.environ.get("EVENT_TEST_POSTGRES_URL")
     if not url:
         pytest.skip("EVENT_TEST_POSTGRES_URL is not configured")
-    return settings.model_copy(update={"database_url": url})
+    return settings.model_copy(update={"database_url": SecretStr(url)})
 
 
 @pytest.fixture

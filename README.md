@@ -18,8 +18,8 @@ Implemented:
 - Basic CI, linting, type-checking, and test configuration
 
 Not implemented yet: registration webhooks, ticket generation, email delivery,
-scanner APIs, admin workflows, and Supabase JWT authentication. Database models
-were added in Phase 2.
+scanner APIs, admin workflows, and login endpoints. JWT verification primitives
+were added in Phase 3; database models were added in Phase 2.
 
 ## Phase 2 scope
 
@@ -34,8 +34,22 @@ Implemented:
 - psycopg v3 pooling with Supabase transaction-pooling compatibility
 - Portable SQLite model tests and isolated PostgreSQL schema/migration tests
 
-Not implemented yet: registration webhook endpoints, HMAC authentication, QR
-generation, email sending/worker, check-in API, admin APIs, and Supabase JWT auth.
+Not implemented yet: registration webhook endpoints, HMAC-authenticated routes,
+QR generation, email sending/worker, check-in API, and admin APIs. Security
+primitives were added in Phase 3.
+
+## Phase 3 scope
+
+Implemented as reusable primitives only (no product endpoints):
+
+- HMAC-SHA256 webhook authentication with key-ID rotation and timestamp tolerance
+- Supabase JWT verification with HS256 shared secret or rotating JWKS keys
+- Event-scoped RBAC backed by `staff_memberships`, exposed as FastAPI dependencies
+- Secure ticket-token generation, SHA-256 hashing, and constant-time comparison
+- Shared PostgreSQL fixed-window rate limiting for webhook, check-in, and export scopes
+
+Not implemented yet: Google Forms webhook endpoint, login endpoints, QR generation,
+Resend integration, email worker, scanner API, and admin API endpoints.
 
 ## Local setup
 
@@ -86,27 +100,71 @@ All variables use the `EVENT_` prefix and are validated at startup.
 | `EVENT_DB_STATEMENT_TIMEOUT_MS` | No | `30000` | Per-statement timeout |
 | `EVENT_DB_PREPARE_THRESHOLD` | No | `0` | psycopg v3 prepared statements; `0` for transaction pooling |
 | `EVENT_DB_ECHO` | No | `false` | SQL echo; never enable in production |
+| `EVENT_WEBHOOK_SIGNING_KEYS` | No | empty | JSON object of key ID → shared secret (`SecretStr`) |
+| `EVENT_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | No | `300` | Accepted clock skew for webhook timestamps |
+| `EVENT_SUPABASE_URL` | No | — | Supabase project URL; supplies default issuer/JWKS URL |
+| `EVENT_SUPABASE_JWT_STRATEGY` | No | `hs256` | `hs256` shared secret or `jwks` asymmetric keys |
+| `EVENT_SUPABASE_JWT_SECRET` | No | — | HS256 signing secret (`SecretStr`) |
+| `EVENT_SUPABASE_JWKS_URL` | No | — | Explicit JWKS URL; overrides the Supabase default |
+| `EVENT_JWT_ISSUER` | No | derived | Explicit issuer; overrides the Supabase default |
+| `EVENT_JWT_AUDIENCE` | No | `authenticated` | Expected JWT audience |
+| `EVENT_JWT_LEEWAY_SECONDS` | No | `0` | Small clock skew allowance for `exp`/`iat` |
+| `EVENT_RATE_LIMIT_WINDOW_SECONDS` | No | `60` | Fixed-window duration |
+| `EVENT_WEBHOOK_RATE_LIMIT` | No | `60` | Requests per webhook scope window |
+| `EVENT_CHECKIN_VERIFY_RATE_LIMIT` | No | `120` | Requests per check-in verification window |
+| `EVENT_CHECKIN_CONFIRM_RATE_LIMIT` | No | `60` | Requests per check-in confirmation window |
+| `EVENT_ADMIN_EXPORT_RATE_LIMIT` | No | `10` | Requests per administrative export window |
+
+Sensitive values are parsed as Pydantic `SecretStr` and are never rendered in logs
+or error responses. Redis is not used; rate-limit counters are stored in PostgreSQL.
+
+## Security architecture
+
+- **Webhooks:** `require_webhook_auth` reads the raw body, resolves the signing
+  secret by `X-Webhook-Key-Id`, validates `X-Webhook-Timestamp` within the configured
+  tolerance, and verifies `HMAC-SHA256(timestamp.POST./api/v1/webhooks/google-forms.raw_body)`
+  using `hmac.compare_digest`. Missing, invalid, expired, or unknown-key requests
+  receive HTTP 401. Add a new key ID to rotate secrets; remove the old one only
+  after all senders have switched.
+- **JWTs:** `get_current_user` accepts only `Bearer` tokens and delegates to
+  `JwtVerifier`, which verifies the signature before reading claims, checks issuer,
+  audience, expiration, and required claims, and requires a UUID `sub`. The `jwks`
+  strategy uses `PyJWKClient` with key caching and refreshes on unknown `kid`, so
+  Supabase key rotation is handled without redeployment.
+- **RBAC:** `require_permission(Permission.X)` reads `event_id` from the route,
+  loads the authenticated user's `staff_memberships` row for that event, and checks
+  the role mapping. JWT role claims are never trusted. Unknown permissions and
+  missing/wrong-event memberships deny access (HTTP 403).
+- **Ticket tokens:** raw values are generated with `secrets.token_urlsafe(32)`;
+  only their deterministic SHA-256 digests are suitable for persistence.
+- **Rate limiting:** a shared `rate_limit_counters` table and atomic upsert provide
+  fixed-window limits across backend instances. Subjects must be opaque; callers
+  should hash IPs or other personal identifiers before passing them.
+
+No secrets, signatures, raw bodies, or raw tokens are logged. Field-level privacy
+for attendee responses must still be enforced by future response schemas.
 
 ## Database / Alembic
 
-All mapped classes are registered through `app.db.models`. Alembic reads the same
+All mapped classes are registered through `app.db.models`; the shared rate-limit
+table is registered through `app.security.rate_limit`. Alembic reads the same
 `EVENT_DATABASE_URL` setting as the application.
 
 ```bash
-# Apply the initial schema
+# Apply all revisions
 alembic upgrade head
 
 # Verify the database matches the model metadata
 alembic check
 
-# Initial revision only: drops all domain tables and native enum types
+# Destructive: drops all domain tables, enums, and rate-limit counters
 alembic downgrade base
 ```
 
 Revision `20261127_0001` creates all nine domain tables, their native enums,
-foreign keys, unique constraints, and indexes. Only hashed ticket tokens and
-webhook payload hashes are stored; raw ticket tokens and raw webhook payloads are
-never persisted.
+foreign keys, unique constraints, and indexes. Revision `20261127_0002` adds the
+`rate_limit_counters` table. Only hashed ticket tokens and webhook payload hashes
+are stored; raw ticket tokens and raw webhook payloads are never persisted.
 
 ## Tests and quality checks
 

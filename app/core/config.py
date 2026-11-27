@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -12,6 +14,10 @@ AppEnvironment = Literal["local", "test", "development", "staging", "production"
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogFormat = Literal["json", "console"]
 CorsOrigins = Annotated[list[str], NoDecode]
+SupabaseJwtStrategy = Literal["hs256", "jwks"]
+
+_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_URL_SCHEME_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 
 _ALLOWED_DATABASE_SCHEMES = (
     "postgresql+psycopg://",
@@ -50,6 +56,26 @@ class Settings(BaseSettings):
     db_prepare_threshold: int | None = Field(default=0, ge=0)
     db_echo: bool = False
 
+    # Webhook HMAC authentication. Values are JSON-encoded SecretStr mappings.
+    webhook_signing_keys: dict[str, SecretStr] = Field(default_factory=dict)
+    webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=1, le=3600)
+
+    # Supabase JWT verification.
+    supabase_url: str | None = None
+    supabase_jwt_strategy: SupabaseJwtStrategy = "hs256"
+    supabase_jwt_secret: SecretStr | None = None
+    supabase_jwks_url: str | None = None
+    jwt_issuer: str | None = None
+    jwt_audience: str = Field(default="authenticated", min_length=1)
+    jwt_leeway_seconds: int = Field(default=0, ge=0)
+
+    # Shared rate limiting. No Redis is required; the counters live in PostgreSQL.
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+    webhook_rate_limit: int = Field(default=60, ge=1)
+    checkin_verify_rate_limit: int = Field(default=120, ge=1)
+    checkin_confirm_rate_limit: int = Field(default=60, ge=1)
+    admin_export_rate_limit: int = Field(default=10, ge=1)
+
     @field_validator("service_name", "app_version", mode="before")
     @classmethod
     def _strip_non_empty(cls, value: object) -> object:
@@ -80,6 +106,54 @@ class Settings(BaseSettings):
             raise ValueError(f"database_url must use one of: {allowed}")
         return SecretStr(raw)
 
+    @field_validator("webhook_signing_keys", mode="before")
+    @classmethod
+    def _parse_webhook_signing_keys(cls, value: object) -> object:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            if not value.strip():
+                return {}
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("webhook_signing_keys must be valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("webhook_signing_keys must be a JSON object")
+            return parsed
+        return value
+
+    @field_validator("webhook_signing_keys")
+    @classmethod
+    def _validate_webhook_signing_keys(cls, value: dict[str, SecretStr]) -> dict[str, SecretStr]:
+        cleaned: dict[str, SecretStr] = {}
+        for key_id, secret in value.items():
+            normalized_id = key_id.strip()
+            if not _KEY_ID_PATTERN.fullmatch(normalized_id):
+                raise ValueError("webhook key IDs must match [A-Za-z0-9_-]{1,64}")
+            raw = secret.get_secret_value().strip()
+            if not raw:
+                raise ValueError(f"webhook signing key '{normalized_id}' must not be empty")
+            cleaned[normalized_id] = SecretStr(raw)
+        return cleaned
+
+    @field_validator("supabase_url", "supabase_jwks_url", mode="before")
+    @classmethod
+    def _normalize_optional_url(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped.rstrip("/") or None
+        return value
+
+    @field_validator("supabase_url", "supabase_jwks_url")
+    @classmethod
+    def _validate_optional_url(cls, value: str | None) -> str | None:
+        if value is not None and not _URL_SCHEME_PATTERN.match(value):
+            raise ValueError("URL must start with http:// or https://")
+        return value
+
     @property
     def api_prefix(self) -> str:
         """Versioned API prefix, e.g. /api/v1."""
@@ -93,6 +167,24 @@ class Settings(BaseSettings):
     def database_url_value(self) -> str:
         """Return the raw database URL without exposing it via repr or logs."""
         return self.database_url.get_secret_value()
+
+    @property
+    def jwt_issuer_value(self) -> str | None:
+        """Resolve the explicit issuer or the Supabase default issuer."""
+        if self.jwt_issuer:
+            return self.jwt_issuer.rstrip("/")
+        if self.supabase_url:
+            return f"{self.supabase_url}/auth/v1"
+        return None
+
+    @property
+    def supabase_jwks_url_value(self) -> str | None:
+        """Resolve the explicit JWKS URL or the Supabase default JWKS URL."""
+        if self.supabase_jwks_url:
+            return self.supabase_jwks_url
+        if self.supabase_url:
+            return f"{self.supabase_url}/auth/v1/.well-known/jwks.json"
+        return None
 
 
 @lru_cache
