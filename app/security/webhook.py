@@ -1,4 +1,4 @@
-"""HMAC-SHA256 authentication for future Google Apps Script webhooks."""
+"""HMAC-SHA256 authentication for Google Apps Script webhooks."""
 
 from __future__ import annotations
 

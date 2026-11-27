@@ -17,9 +17,10 @@ Implemented:
 - Alembic initialisation (no domain migrations yet)
 - Basic CI, linting, type-checking, and test configuration
 
-Not implemented yet: registration webhooks, ticket generation, email delivery,
-scanner APIs, admin workflows, and login endpoints. JWT verification primitives
-were added in Phase 3; database models were added in Phase 2.
+Not implemented yet: ticket generation, email delivery, scanner APIs, admin
+workflows, and login endpoints. The registration webhook was added in Phase 4;
+JWT verification primitives were added in Phase 3; database models were added in
+Phase 2.
 
 ## Phase 2 scope
 
@@ -34,8 +35,8 @@ Implemented:
 - psycopg v3 pooling with Supabase transaction-pooling compatibility
 - Portable SQLite model tests and isolated PostgreSQL schema/migration tests
 
-Not implemented yet: registration webhook endpoints, HMAC-authenticated routes,
-QR generation, email sending/worker, check-in API, and admin APIs. Security
+Not implemented yet: QR generation, email sending/worker, check-in API, and admin
+APIs. The HMAC-authenticated registration webhook was added in Phase 4; security
 primitives were added in Phase 3.
 
 ## Phase 3 scope
@@ -48,8 +49,123 @@ Implemented as reusable primitives only (no product endpoints):
 - Secure ticket-token generation, SHA-256 hashing, and constant-time comparison
 - Shared PostgreSQL fixed-window rate limiting for webhook, check-in, and export scopes
 
-Not implemented yet: Google Forms webhook endpoint, login endpoints, QR generation,
-Resend integration, email worker, scanner API, and admin API endpoints.
+Not implemented yet: login endpoints, QR generation, Resend integration, email
+worker, scanner API, and admin API endpoints.
+
+## Phase 4 scope
+
+Implemented:
+
+- `POST /api/v1/webhooks/google-forms` using the Phase 3 HMAC dependency and shared webhook rate limiter
+- Pydantic RSVP request contract with explicit attendance values and safe normalization
+- Transactional service layer for event resolution, availability, capacity, attendee identity, and registration
+- Idempotent processing backed by the existing `webhook_events` ledger and database constraints
+- Controlled outcomes for registered, declined, duplicate, already registered, validation rejection, event unavailable, capacity reached, and identity conflict
+
+Not implemented yet: ticket generation, QR codes, email delivery, scanner endpoints,
+admin endpoints, automatic event creation, and any Phase 5 functionality.
+
+### Google Forms webhook contract
+
+**Endpoint:** `POST /api/v1/webhooks/google-forms`
+
+Required headers:
+
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `X-Webhook-Key-Id` | Configured key ID, for example `v1` |
+| `X-Webhook-Timestamp` | Unix timestamp in seconds |
+| `X-Webhook-Signature` | Hex-encoded HMAC-SHA256 signature |
+
+Example request body:
+
+```json
+{
+  "event_slug": "summer-social-2026",
+  "submission_id": "form-response-000123",
+  "name": "Ada Lovelace",
+  "email": "ada@example.com",
+  "phone": "+1-555-0100",
+  "urn": "2026-000123",
+  "attendance": "yes"
+}
+```
+
+The event must already exist in the database. This endpoint never creates events.
+The event must be `published`, within its configured registration window, and
+below its configured capacity for `yes` responses.
+
+The sender must normalize attendance to exactly `yes` or `no`. Other values are
+rejected. The backend additionally trims surrounding whitespace and lowercases
+the value before validation, so ` Yes ` is accepted as `yes`. Email is trimmed and
+lowercased; URN is trimmed and uppercased; name and phone are trimmed, and an empty
+phone becomes `null`. No other URN transformation is applied.
+
+Signing uses the Phase 3 implementation. The signed message is the literal bytes:
+
+```text
+{timestamp}.POST./api/v1/webhooks/google-forms.{rawRequestJsonBody}
+```
+
+Compute `HMAC-SHA256(sharedSecret, message)` and send the hex digest in
+`X-Webhook-Signature`. The exact body string used for signing must be the body
+sent. Timestamp tolerance, key IDs, and secrets come from
+`EVENT_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` and `EVENT_WEBHOOK_SIGNING_KEYS`.
+
+Example confirmed response (`201 Created`):
+
+```json
+{
+  "success": true,
+  "outcome": "registered",
+  "submission_id": "form-response-000123",
+  "message": "RSVP registered."
+}
+```
+
+Example declined response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "outcome": "declined",
+  "submission_id": "form-response-000124",
+  "message": "Declined RSVP recorded."
+}
+```
+
+Example duplicate response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "outcome": "duplicate_submission",
+  "submission_id": "form-response-000123",
+  "message": "Submission already processed."
+}
+```
+
+Other recorded business outcomes also return `200 OK`: `already_registered`,
+`event_unavailable`, `capacity_reached`, and `identity_conflict`. Schema validation
+failures return `422 Unprocessable Entity` with outcome `rejected_validation`.
+Authentication failures return the standard `401` error envelope from Phase 3,
+and rate-limit failures return the standard `429` error envelope. No response
+contains attendee personal data, SQL details, signatures, or secrets.
+
+### Apps Script sender configuration
+
+1. Store the key ID and shared secret in Apps Script Script Properties, not in source.
+2. Map the actual Google Sheets headers to the JSON contract above. The backend does not know sheet column names.
+3. Normalize `attendance` to `yes` or `no` before sending.
+4. Serialize the payload once, then use that exact string as both the request body and the signed message.
+5. Compute and hex-encode the HMAC signature with `Utilities.computeHmacSha256Signature`.
+6. Send `UrlFetchApp.fetch` with `method: 'post'`, `contentType: 'application/json'`, and the three `X-Webhook-*` headers.
+7. Log only the response status, outcome, and submission ID; never log the shared secret, signature, or raw payload.
+8. To rotate secrets, add a new key ID to `EVENT_WEBHOOK_SIGNING_KEYS`, update the Script Property, then remove the old key after all senders have switched.
+
+No migration was required for Phase 4. The existing `webhook_events` enum and
+`error_code` field represent the outcomes without changing schema.
 
 ## Local setup
 
