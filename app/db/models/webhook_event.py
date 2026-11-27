@@ -44,6 +44,7 @@ class WebhookEvent(Base):
             sqlite_where=text("request_id IS NOT NULL"),
         ),
         Index("ix_webhook_events_event_slug", "event_slug"),
+        Index("ix_webhook_events_event_slug_outcome", "event_slug", "outcome"),
         Index("ix_webhook_events_source_received_at", "source", "received_at"),
     )
 

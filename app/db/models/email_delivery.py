@@ -37,7 +37,12 @@ class EmailDelivery(Base):
 
     __tablename__ = "email_deliveries"
     __table_args__ = (
-        UniqueConstraint("ticket_id", "purpose", name="uq_email_deliveries_ticket_purpose"),
+        UniqueConstraint(
+            "ticket_id",
+            "purpose",
+            "resend_sequence",
+            name="uq_email_deliveries_ticket_purpose_sequence",
+        ),
         Index("ix_email_deliveries_registration_id", "registration_id"),
         Index("ix_email_deliveries_status_next_attempt", "status", "next_attempt_at"),
     )
@@ -56,6 +61,11 @@ class EmailDelivery(Base):
     purpose: Mapped[EmailPurpose] = mapped_column(
         native_enum(EmailPurpose, "email_purpose"),
         nullable=False,
+    )
+    # 0 is the original issuance job. Higher values are explicit resend/retry
+    # jobs, allowing legitimate repeats without overwriting delivery history.
+    resend_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
     )
     status: Mapped[EmailDeliveryStatus] = mapped_column(
         native_enum(EmailDeliveryStatus, "email_delivery_status"),

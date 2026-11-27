@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.api.v1.admin import router as v1_admin_router
 from app.api.v1.checkins import router as v1_checkins_router
 from app.api.v1.health import router as v1_health_router
 from app.api.v1.webhooks import router as v1_webhooks_router
@@ -12,3 +13,4 @@ api_router = APIRouter()
 api_router.include_router(v1_health_router)
 api_router.include_router(v1_webhooks_router)
 api_router.include_router(v1_checkins_router)
+api_router.include_router(v1_admin_router)

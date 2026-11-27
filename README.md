@@ -17,8 +17,9 @@ Implemented:
 - Alembic initialisation (no domain migrations yet)
 - Basic CI, linting, type-checking, and test configuration
 
-Not implemented yet: admin workflows and login endpoints. Scanner APIs were added
-in Phase 6; ticket issuance and email delivery were added in Phase 5; the
+Admin workflows were added in Phase 7. Dedicated login/password endpoints remain
+out of scope because Supabase Auth is used directly. Scanner APIs were added in
+Phase 6; ticket issuance and email delivery were added in Phase 5; the
 registration webhook was added in Phase 4; JWT verification primitives were added
 in Phase 3; database models were added in Phase 2.
 
@@ -35,7 +36,7 @@ Implemented:
 - psycopg v3 pooling with Supabase transaction-pooling compatibility
 - Portable SQLite model tests and isolated PostgreSQL schema/migration tests
 
-Not implemented yet: admin APIs. The check-in API was added in Phase 6; QR
+Admin APIs were added in Phase 7. The check-in API was added in Phase 6; QR
 generation, email sending, and the worker were added in Phase 5; the
 HMAC-authenticated registration webhook was added in Phase 4; security primitives
 were added in Phase 3.
@@ -50,9 +51,9 @@ Implemented as reusable primitives only (no product endpoints):
 - Secure ticket-token generation, SHA-256 hashing, and constant-time comparison
 - Shared PostgreSQL fixed-window rate limiting for webhook, check-in, and export scopes
 
-Not implemented yet: login endpoints and admin API endpoints. Scanner endpoints
-were added in Phase 6; QR generation, Resend integration, and the email worker
-were added in Phase 5.
+Dedicated login endpoints remain out of scope; admin API endpoints were added in
+Phase 7. Scanner endpoints were added in Phase 6; QR generation, Resend
+integration, and the email worker were added in Phase 5.
 
 ## Phase 4 scope
 
@@ -65,8 +66,8 @@ Implemented:
 - Controlled outcomes for registered, declined, duplicate, already registered, validation rejection, event unavailable, capacity reached, and identity conflict
 
 Ticket generation, QR codes, and email delivery were added in Phase 5; scanner
-endpoints were added in Phase 6. Still not implemented: admin endpoints and
-automatic event creation.
+endpoints were added in Phase 6. Admin endpoints and automatic event creation
+were added in Phase 7; dedicated login endpoints remain out of scope.
 
 ### Google Forms webhook contract
 
@@ -181,10 +182,10 @@ Implemented:
 - Exponential backoff, bounded retries, dead-letter status, and structured PII-free logs
 - Professional responsive HTML ticket email with an inline QR attachment
 
-Not implemented yet: frontend scanner, admin dashboard, deployment, and any Phase 7
-functionality. The backend scanner API was added in Phase 6. No migration was
-required for Phase 5: the existing `tickets`, `email_deliveries`, and webhook-ledger
-constraints cover the workflow.
+Admin APIs were added in Phase 7. Still not implemented in the backend: frontend
+scanner, admin dashboard, and deployment. The backend scanner API was added in
+Phase 6. No migration was required for Phase 5: the existing `tickets`,
+`email_deliveries`, and webhook-ledger constraints cover the workflow.
 
 ### Ticket issuance architecture
 
@@ -468,6 +469,369 @@ export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
 python -m pytest tests/test_checkin_api.py -q
 ```
 
+## Phase 7 scope
+
+Implemented:
+
+- Thin `/api/v1/admin` routers with all business rules in service modules
+- Pydantic request/response whitelists; no ORM objects or internal IDs are returned
+- Event creation, listing, detail, patch, publish, and archive with lifecycle guards
+- Attendee search/list/detail with admin and viewer response schemas and role-aware PII
+- Registration listing/detail and safe, transactional, idempotent cancellation
+- Ticket listing, auditable revocation, and outbox-only email resend
+- Staff membership list/add/role-change/remove with final-admin protection
+- SQL-backed analytics for overview, registrations, attendance, and email deliveries
+- Streaming CSV/XLSX attendee and check-in exports with formula-injection escaping
+- Read-only, redacted audit-log queries with filters and stable ordering
+- Email-delivery monitoring and safe retry of failed/dead-letter outbox jobs
+- New permissions, event-scoped authorization, global admin authorization, and audits
+- PostgreSQL transaction/locking/concurrency tests with mocked JWT authentication
+
+There are still no login, password, signup, or token-issuance endpoints. Supabase
+Auth remains the only identity provider. The frontend scanner, admin dashboard,
+and deployment remain out of scope.
+
+Revision `20261127_0003` adds `email_deliveries.resend_sequence`, replaces the
+`(ticket_id, purpose)` unique constraint with
+`(ticket_id, purpose, resend_sequence)`, and adds the
+`ix_webhook_events_event_slug_outcome` analytics index. The downgrade reverses all
+three changes. Initial issuance jobs use sequence `0`; resends and retries create
+new rows with increasing sequences and never overwrite historical records.
+`openpyxl>=3.1,<4.0` was added for XLSX generation.
+
+### Staff onboarding and first-admin bootstrap
+
+Staff users must already exist in Supabase Auth. The `user_id` accepted by the
+staff API is the UUID from `auth.users` (visible in the Supabase dashboard); this
+API does not create or modify auth accounts.
+
+Event creation and listing are global administrative operations. Because they
+cannot be scoped to an existing event slug, they require an `admin` membership on
+at least one event. Seed the first event and/or first admin directly, then use the
+APIs for everything else:
+
+```sql
+-- Replace both placeholders with real UUIDs. The user must exist in auth.users.
+INSERT INTO staff_memberships (user_id, event_id, role)
+SELECT '00000000-0000-0000-0000-000000000000'::uuid, id, 'admin'::staff_role
+FROM events
+WHERE slug = 'summer-social-2026';
+```
+
+If no event exists yet, insert one event row first, then run the membership
+insert. Fabricated JWT role claims are ignored; roles are always read from
+`staff_memberships`.
+
+### Endpoint map and permissions
+
+All paths below are prefixed with `/api/v1`. Every endpoint requires
+`Authorization: Bearer <supabase-jwt>`. `checkin` users can use the Phase 6
+scanner endpoints but no Phase 7 admin endpoint.
+
+| Method | Path | Permission | Allowed roles |
+|---|---|---|---|
+| `POST` | `/admin/events` | `event.manage` | `admin` on any event (global) |
+| `GET` | `/admin/events` | `event.manage` | `admin` on any event (global) |
+| `GET` | `/admin/events/{event_slug}` | `event.manage` | `admin` |
+| `PATCH` | `/admin/events/{event_slug}` | `event.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/publish` | `event.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/archive` | `event.manage` | `admin` |
+| `GET` | `/admin/events/{event_slug}/attendees` | `attendee.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/attendees/{urn}` | `attendee.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/registrations` | `registration.manage` | `admin` |
+| `GET` | `/admin/events/{event_slug}/registrations/{urn}` | `registration.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/registrations/{urn}/cancel` | `registration.manage` | `admin` |
+| `GET` | `/admin/events/{event_slug}/tickets` | `ticket.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/tickets/{ticket_code}/revoke` | `ticket.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/tickets/{ticket_code}/resend` | `ticket.manage` | `admin` |
+| `GET` | `/admin/events/{event_slug}/staff` | `staff.manage` | `admin` |
+| `POST` | `/admin/events/{event_slug}/staff` | `staff.manage` | `admin` |
+| `PATCH` | `/admin/events/{event_slug}/staff/{user_id}` | `staff.manage` | `admin` |
+| `DELETE` | `/admin/events/{event_slug}/staff/{user_id}` | `staff.manage` | `admin` |
+| `GET` | `/admin/events/{event_slug}/analytics/overview` | `event.stats.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/analytics/registrations` | `event.stats.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/analytics/attendance` | `event.stats.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/analytics/email-deliveries` | `event.stats.view` | `admin`, `viewer` |
+| `GET` | `/admin/events/{event_slug}/exports/attendees.csv` | `attendance.export` | `admin` |
+| `GET` | `/admin/events/{event_slug}/exports/attendees.xlsx` | `attendance.export` | `admin` |
+| `GET` | `/admin/events/{event_slug}/exports/checkins.csv` | `attendance.export` | `admin` |
+| `GET` | `/admin/events/{event_slug}/exports/checkins.xlsx` | `attendance.export` | `admin` |
+| `GET` | `/admin/events/{event_slug}/audit-logs` | `audit.view` | `admin` |
+| `GET` | `/admin/events/{event_slug}/email-deliveries` | `email_delivery.view` | `admin` |
+| `POST` | `/admin/events/{event_slug}/email-deliveries/{delivery_id}/retry` | `email_delivery.manage` | `admin` |
+
+Role summary:
+
+| Role | Phase 7 access |
+|---|---|
+| `admin` | All endpoints above; event create/list require an admin membership on at least one event |
+| `viewer` | Attendee list/detail (restricted schema) and all four analytics endpoints; email search is denied |
+| `checkin` | No Phase 7 admin endpoints; use `/events/{event_slug}/checkins/*` instead |
+
+Unknown event slugs, wrong-event memberships, and insufficient roles all return
+the standard `403 FORBIDDEN` envelope without revealing whether another event
+exists. Cross-event attendee, registration, ticket, staff, audit, and delivery
+references return `404 NOT_FOUND`.
+
+### Common request conventions
+
+- Collections return `{"items": [...], "page": 1, "page_size": 50, "total": 12}`.
+- `page >= 1`; `1 <= page_size <= 100`; default `page_size` is `50`.
+- Sorting is stable: the listed sort key is followed by a UUID/ID tiebreaker.
+- Date/time query parameters must be timezone-aware ISO 8601 values.
+- Public references are `urn` for attendees and registrations, `ticket_code` for
+  tickets, UUID for staff users, audit entries, and email deliveries.
+- No response includes raw ticket tokens, token hashes, provider secrets, SQL
+  errors, or internal numeric IDs.
+
+### Event contracts
+
+`POST /admin/events` creates a `draft` event and assigns the caller as its first
+admin. `slug` is lowercase alphanumeric with single hyphens; `timezone` must be a
+valid IANA name; all timestamps must include an offset. Timeline rules are:
+`ends_at > starts_at`, `registration_opens_at < starts_at`,
+`registration_closes_at <= starts_at`, and
+`registration_closes_at > registration_opens_at`.
+
+```bash
+export ADMIN_JWT='replace-with-a-supabase-jwt-for-an-admin-user'
+export BASE='http://127.0.0.1:8000/api/v1/admin'
+
+curl -X POST "$BASE/events" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "slug": "summer-social-2026",
+    "name": "Summer Social",
+    "starts_at": "2026-07-01T09:00:00Z",
+    "ends_at": "2026-07-01T18:00:00Z",
+    "timezone": "UTC",
+    "venue": "Main Hall",
+    "capacity": 200,
+    "registration_opens_at": "2026-06-01T00:00:00Z",
+    "registration_closes_at": "2026-06-30T23:59:00Z"
+  }'
+```
+
+`PATCH /admin/events/{slug}` accepts only mutable fields; `slug` and `status` are
+immutable and invalid timeline combinations return `422 VALIDATION_ERROR`. The
+only lifecycle transitions are `draft -> published -> archived`; revisiting an
+archived event returns `409 CONFLICT`. Event mutations write
+`event.created`, `event.updated`, `event.published`, or `event.archived` audits.
+
+```bash
+curl -X POST "$BASE/events/summer-social-2026/publish" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+curl "$BASE/events?status=published&page=1&page_size=20" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Attendee and registration contracts
+
+Attendee listing supports `search` (name or URN), exact `urn`, admin-only exact
+`email`, `registration_status`, `ticket_status`, `check_in_status`
+(`pending`/`checked_in`), `sort_by` (`registered_at`/`name`), and `sort_order`
+(`asc`/`desc`). Admins receive `AdminAttendeeResponse` with contact details,
+registration/ticket/check-in state, station, and public references. Viewers
+receive only `attendee_reference`, `full_name`, `urn`, `registration_status`,
+`ticket_status`, `check_in_status`, and `checked_in_at`; an `email` filter from a
+viewer returns `403`.
+
+```bash
+curl "$BASE/events/summer-social-2026/attendees?check_in_status=checked_in&sort_by=name&sort_order=asc" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+curl "$BASE/events/summer-social-2026/attendees/URN-EXAMPLE" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+Registration listing supports `reference` (URN), `name`, `email`,
+`registration_status`, `ticket_status`, and `check_in_status`. Cancellation is
+transactional and idempotent:
+
+- `registered` -> `cancelled`; an `active` ticket is revoked in the same commit.
+- Repeated cancellation is a no-op and creates no second audit record.
+- `checked_in`, a used ticket, or an existing check-in record returns `409` and
+  preserves attendance history.
+- A `registration.cancelled` audit records safe status fields and whether a
+  ticket was revoked.
+
+```bash
+curl -X POST "$BASE/events/summer-social-2026/registrations/URN-EXAMPLE/cancel" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Ticket contracts and resend behavior
+
+Ticket listing supports `ticket_status` and partial `reference` (`ticket_code`)
+filters. Responses contain only public references and statuses; tokens and
+hashes are never returned. Revocation changes `active` to `revoked` in one
+transaction with a `ticket.revoked` audit. Repeated revocation is idempotent;
+`used`, `expired`, and already checked-in tickets return `409`.
+
+Resend never calls Resend directly and never regenerates a credential. It creates
+a new `pending` `email_deliveries` job with `purpose=ticket_issued` and the next
+`resend_sequence` for the worker. A `pending` or `failed` job for the same ticket
+blocks a duplicate resend with `409 RESEND_ALREADY_PENDING`. Cancelled
+registrations and non-active tickets cannot be resent.
+
+```bash
+curl -X POST "$BASE/events/summer-social-2026/tickets/TICKET-CODE-EXAMPLE/resend" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Staff contracts
+
+`POST /admin/events/{slug}/staff` takes `{"user_id": "<supabase-auth-uuid>",
+"role": "admin|checkin|viewer"}`. Invalid UUIDs return `422`. Duplicate
+memberships return `409`. Role changes write `staff.role_changed` audits,
+addition writes `staff.added`, and removal writes `staff.removed`. The final
+`admin` for an event cannot be demoted or removed (`409 FINAL_ADMIN`).
+
+```bash
+curl -X POST "$BASE/events/summer-social-2026/staff" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"00000000-0000-0000-0000-000000000001","role":"viewer"}'
+
+curl -X PATCH "$BASE/events/summer-social-2026/staff/00000000-0000-0000-0000-000000000001" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"checkin"}'
+```
+
+### Analytics metrics and filters
+
+All analytics endpoints accept `admin` and `viewer`. `from_date` and `to_date`
+are optional, timezone-aware, `to_date >= from_date`, and at most 10 years apart.
+When both are supplied, granularity is `day` for ranges up to 31 days, `week` up
+to 180 days, and `month` otherwise; without a complete range it is `month`.
+Buckets are `date_trunc` of `registered_at` or `checked_in_at` on PostgreSQL.
+
+| Metric | Definition |
+|---|---|
+| `total_registrations` | All registrations for the event |
+| `cancelled_registrations` | Registrations with status `cancelled` |
+| `confirmed_registrations` | `total_registrations - cancelled_registrations` |
+| `checked_in_attendees` | Registrations with status `checked_in` |
+| `not_checked_in_attendees` | `max(confirmed_registrations - checked_in_attendees, 0)` |
+| `declined_rsvps` | Distinct webhook submission IDs with outcome `ignored_declined` for the event slug |
+| `active_tickets` / `used_tickets` / `revoked_tickets` / `expired_tickets` | Ticket status counts joined through the event's registrations |
+| `pending_email_deliveries` / `sent_email_deliveries` / `failed_email_deliveries` / `dead_letter_email_deliveries` | Delivery status counts joined through the event's registrations |
+| `attendance_percentage` | `round(checked_in_attendees / confirmed_registrations * 100, 2)`, or `0.0` when there are no confirmed registrations |
+| `total_in_range` | Sum of registration bucket counts in the requested range |
+| `attempt_summary.total_attempts` | Sum of `email_deliveries.attempts` for the event |
+| `attempt_summary.max_attempts` | Maximum attempt count, or `0` for an empty outbox |
+| `attempt_summary.average_attempts` | Mean attempt count rounded to two decimals, or `0.0` |
+| `attempt_summary.retried_deliveries` | Number of delivery rows with `attempts > 1` |
+
+Analytics responses contain aggregate numbers only: no names, emails, URNs,
+tokens, or ticket references.
+
+```bash
+curl "$BASE/events/summer-social-2026/analytics/attendance" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+curl "$BASE/events/summer-social-2026/analytics/registrations?from_date=2026-06-01T00:00:00Z&to_date=2026-07-02T00:00:00Z" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Export contracts
+
+Four admin-only endpoints stream `attendees` or `checkins` as CSV or XLSX:
+`/exports/attendees.csv`, `/exports/attendees.xlsx`,
+`/exports/checkins.csv`, and `/exports/checkins.xlsx`. Responses use
+`Content-Disposition: attachment; filename="<kind>-<event-slug>.<ext>"`.
+SQL uses server-side batching (`yield_per(500)`) and CSV/XLSX generation is
+streaming or write-only, so memory stays bounded. Each request writes an
+`export.attendees` or `export.checkins` audit containing only the format; no
+exported content is logged. Exports share the `admin_export` rate-limit scope
+(default `EVENT_ADMIN_EXPORT_RATE_LIMIT=10` per window).
+
+| Export | Columns |
+|---|---|
+| Attendees | `name`, `urn`, `email`, `phone`, `registration_status`, `ticket_status`, `registered_at`, `checked_in_at`, `station` |
+| Check-ins | `name`, `urn`, `email`, `phone`, `registration_status`, `ticket_status`, `checked_in_at`, `station`, `source` |
+
+Datetimes are ISO 8601 UTC strings. Any cell beginning with `=`, `+`, `-`, or `@`
+is prefixed with a single quote to prevent spreadsheet formula injection. Ticket
+codes, raw tokens, token hashes, and website/API secrets are not exported.
+
+```bash
+curl "$BASE/events/summer-social-2026/exports/attendees.csv" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -o attendees.csv
+```
+
+### Audit logs
+
+`GET /admin/events/{slug}/audit-logs` supports `action`, `actor_user_id`,
+`from_date`, `to_date`, `page`, `page_size`, and `sort_order`. Results are ordered
+by `created_at` with an ID tiebreaker. Responses include
+`audit_reference`, `action`, `target_type`, `target_id`, `redacted context`,
+`actor_user_id`, and `created_at`. Context is allow-listed to operation metadata;
+tokens, hashes, emails, phones, names, URNs, and passwords are removed. There are
+no audit mutation endpoints: `PATCH`/`DELETE` return `405`.
+
+Audited Phase 7 actions include `event.created`, `event.updated`,
+`event.published`, `event.archived`, `registration.cancelled`,
+`ticket.revoked`, `ticket.resend_queued`, `staff.added`,
+`staff.role_changed`, `staff.removed`, `export.attendees`,
+`export.checkins`, and `email_retry.queued`.
+
+```bash
+curl "$BASE/events/summer-social-2026/audit-logs?action=ticket.revoked&sort_order=desc" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Email delivery monitoring and retry
+
+`GET /admin/events/{slug}/email-deliveries` supports `status`,
+`registration_reference`, `ticket_reference`, `min_attempts`, `max_attempts`,
+`error_code`, `next_attempt_before`, and `next_attempt_after`. Responses expose
+the delivery UUID, public references, purpose, status, attempts, resend sequence,
+error code, retry timestamp, creation time, and sent time. They never contain
+recipient addresses, token values, token hashes, or provider bodies.
+
+`POST /admin/events/{slug}/email-deliveries/{delivery_id}/retry` accepts only
+`failed` or `dead_letter` jobs. It preserves the original record: a `failed` job
+is moved to `dead_letter` with its attempt count and error code intact, and a new
+`pending` job with the next `resend_sequence` is queued. A terminal dead-letter
+cannot be retried again, and another pending/failed job for the same ticket
+returns `409 RESEND_ALREADY_PENDING`. No Resend call is made from the API.
+
+```bash
+curl "$BASE/events/summer-social-2026/email-deliveries?status=failed&min_attempts=1" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+curl -X POST "$BASE/events/summer-social-2026/email-deliveries/00000000-0000-0000-0000-000000000009/retry" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### Phase 7 setup, migrations, and tests
+
+```bash
+python -m pip install -e ".[dev]"   # includes openpyxl>=3.1,<4.0
+alembic upgrade head
+alembic check
+alembic current
+
+# Optional: inspect the Phase 7 revision in isolation
+alembic downgrade 20261127_0002
+alembic upgrade head
+```
+
+Run the full PostgreSQL suite sequentially; these fixtures share one test
+database and truncate domain tables between tests:
+
+```bash
+export EVENT_APP_ENV=test
+export EVENT_DATABASE_URL='postgresql+psycopg://postgres@127.0.0.1:55432/event_test'
+export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
+python -m pytest -q
+```
+
 ## Local setup
 
 Requires Python 3.12 or 3.13.
@@ -572,7 +936,8 @@ or error responses. Redis is not used; rate-limit counters are stored in Postgre
   should hash IPs or other personal identifiers before passing them.
 
 No secrets, signatures, raw bodies, or raw tokens are logged. Field-level privacy
-for attendee responses must still be enforced by future response schemas.
+for attendee responses is enforced by the explicit admin/viewer schemas added in
+Phase 7; ORM objects are never serialized directly.
 
 ## Database / Alembic
 
@@ -593,9 +958,11 @@ alembic downgrade base
 
 Revision `20261127_0001` creates all nine domain tables, their native enums,
 foreign keys, unique constraints, and indexes. Revision `20261127_0002` adds the
-`rate_limit_counters` table. Only hashed ticket tokens and webhook payload hashes
-are stored; raw ticket tokens and raw webhook payloads are never persisted.
-Phase 5 reused these tables and constraints without adding a revision.
+`rate_limit_counters` table. Revision `20261127_0003` adds the email resend
+sequence, sequence-scoped uniqueness, and the webhook analytics index. Only
+hashed ticket tokens and webhook payload hashes are stored; raw ticket tokens and
+raw webhook payloads are never persisted. Phases 5 and 6 reused the existing
+tables and constraints without adding revisions.
 
 ## Tests and quality checks
 

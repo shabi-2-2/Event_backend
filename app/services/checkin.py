@@ -147,12 +147,14 @@ def _evaluate(
         return CheckinOutcome.INVALID_TICKET
     if ticket.status == TicketStatus.USED or checkin is not None:
         return CheckinOutcome.ALREADY_CHECKED_IN
+    if registration.status == RegistrationStatus.CANCELLED:
+        # Administrative cancellation also revokes the ticket. Prefer the
+        # registration-level outcome so cancelled attendees get a clear denial.
+        return CheckinOutcome.REGISTRATION_CANCELLED
     if ticket.status == TicketStatus.REVOKED:
         return CheckinOutcome.REVOKED_TICKET
     if ticket.status == TicketStatus.EXPIRED or _is_expired(ticket, now=now):
         return CheckinOutcome.EXPIRED_TICKET
-    if registration.status == RegistrationStatus.CANCELLED:
-        return CheckinOutcome.REGISTRATION_CANCELLED
     if ticket.status != TicketStatus.ACTIVE or registration.status != RegistrationStatus.REGISTERED:
         return CheckinOutcome.INVALID_REGISTRATION_STATE
     return None

@@ -35,6 +35,10 @@ class Permission(StrEnum):
     ATTENDEE_VIEW = "attendee.view"
     ATTENDEE_VIEW_CHECKIN = "attendee.view.checkin"
     EVENT_STATS_VIEW = "event.stats.view"
+    REGISTRATION_MANAGE = "registration.manage"
+    EMAIL_DELIVERY_VIEW = "email_delivery.view"
+    EMAIL_DELIVERY_MANAGE = "email_delivery.manage"
+    AUDIT_VIEW = "audit.view"
 
 
 _ADMIN = StaffRole.ADMIN
@@ -52,6 +56,10 @@ _ROLE_MAP: dict[Permission, tuple[StaffRole, ...]] = {
     Permission.ATTENDEE_VIEW: (_ADMIN, _VIEWER),
     Permission.ATTENDEE_VIEW_CHECKIN: (_ADMIN, _CHECKIN),
     Permission.EVENT_STATS_VIEW: (_ADMIN, _VIEWER),
+    Permission.REGISTRATION_MANAGE: (_ADMIN,),
+    Permission.EMAIL_DELIVERY_VIEW: (_ADMIN,),
+    Permission.EMAIL_DELIVERY_MANAGE: (_ADMIN,),
+    Permission.AUDIT_VIEW: (_ADMIN,),
 }
 
 
@@ -62,6 +70,20 @@ class EventAccess:
     user_id: UUID
     event_id: UUID
     role: StaffRole
+    permission: Permission
+
+
+@dataclass(frozen=True)
+class GlobalAccess:
+    """A verified principal with a platform-wide administrative permission.
+
+    Platform-wide endpoints (for example event creation) cannot be scoped to an
+    existing event slug, so they require an administrative membership on at
+    least one event. All event-specific endpoints continue to use
+    :class:`EventAccess`.
+    """
+
+    user_id: UUID
     permission: Permission
 
 
@@ -180,5 +202,48 @@ def require_permission_by_slug(permission: Permission) -> Callable[..., Any]:
                 message="You do not have access to this resource.",
             ) from None
         return access
+
+    return dependency
+
+
+def require_global_permission(permission: Permission) -> Callable[..., Any]:
+    """Build a dependency for non-event-specific administrative operations.
+
+    Access is granted when the authenticated user holds any allowed role on at
+    least one event. Event-specific resources still require a matching scoped
+    membership through :func:`require_permission_by_slug`.
+    """
+
+    async def dependency(
+        user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
+        session: Session = Depends(get_session),  # noqa: B008
+    ) -> GlobalAccess:
+        roles = roles_for(permission)
+        try:
+            if not roles:
+                raise AuthorizationDenied("permission_unavailable")
+            membership = session.scalar(
+                select(StaffMembership).where(
+                    StaffMembership.user_id == user.id,
+                    StaffMembership.role.in_(roles),
+                )
+            )
+            if membership is None:
+                raise AuthorizationDenied()
+        except AuthorizationDenied as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "rbac_denied",
+                reason=exc.reason,
+                permission=getattr(permission, "value", str(permission)),
+                scope="global",
+            )
+            raise AppError(
+                status_code=403,
+                code="FORBIDDEN",
+                message="You do not have access to this resource.",
+            ) from None
+        return GlobalAccess(user_id=user.id, permission=permission)
 
     return dependency
