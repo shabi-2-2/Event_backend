@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
 from app.core.logging import get_logger, log_event
 from app.db.session import get_session
 from app.schemas.webhook import RsvpWebhookRequest, WebhookOutcomeCode, WebhookResponse
@@ -64,6 +65,9 @@ async def google_forms_webhook(
         build_subject("webhook", identity.key_id),
     )
 
+    settings: Settings = request.app.state.settings
+    derivation_key = settings.ticket_token_derivation_key_value()
+
     # require_webhook_auth has already read and cached these exact bytes.
     raw_body = await request.body()
     parsed = _decode_json(raw_body)
@@ -75,7 +79,9 @@ async def google_forms_webhook(
     if payload is None:
         result = webhook_ingestion.record_validation_rejection(session, raw_body, parsed)
     else:
-        result = webhook_ingestion.process_rsvp(session, payload, raw_body)
+        result = webhook_ingestion.process_rsvp(
+            session, payload, raw_body, derivation_key=derivation_key
+        )
 
     log_event(
         logger,

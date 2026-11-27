@@ -22,7 +22,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.db.models import Attendee, Event, Registration, WebhookEvent
+from app.db.models import Attendee, EmailDelivery, Event, Registration, Ticket, WebhookEvent
 from app.db.models.common import EventStatus, RegistrationStatus, WebhookOutcome
 from app.main import create_app
 from app.schemas.webhook import RsvpWebhookRequest
@@ -638,11 +638,18 @@ def test_rollback_leaves_no_successful_ledger_record(
 
     monkeypatch.setattr(webhook_ingestion, "WebhookEvent", fail_on_ledger)
     with harness.factory() as session, pytest.raises(RuntimeError):
-        webhook_ingestion.process_rsvp(session, request, body)
+        webhook_ingestion.process_rsvp(
+            session,
+            request,
+            body,
+            derivation_key=harness.settings.ticket_token_derivation_key_value(),
+        )
 
     assert _count(harness.factory, WebhookEvent) == 0
     assert _count(harness.factory, Registration) == 0
     assert _count(harness.factory, Attendee) == 0
+    assert _count(harness.factory, Ticket) == 0
+    assert _count(harness.factory, EmailDelivery) == 0
 
     monkeypatch.undo()
     response = _post(harness.client, payload)

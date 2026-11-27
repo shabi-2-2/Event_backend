@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Attendee, Event, Registration, WebhookEvent
 from app.db.models.common import EventStatus, RegistrationStatus, WebhookOutcome
 from app.schemas.webhook import AttendanceValue, RsvpWebhookRequest, WebhookOutcomeCode
+from app.services.ticket_issuance import issue_ticket_and_outbox
 
 SOURCE = "google_forms"
 _INVALID_EVENT_SLUG = "_invalid"
@@ -264,7 +265,11 @@ def _record_and_return(
 
 
 def _process_new_submission(
-    session: Session, request: RsvpWebhookRequest, digest: str
+    session: Session,
+    request: RsvpWebhookRequest,
+    digest: str,
+    *,
+    derivation_key: str,
 ) -> WebhookProcessingResult:
     event_slug = request.event_slug
     submission_id = request.submission_id
@@ -314,7 +319,11 @@ def _process_new_submission(
         )
 
     attendee = resolution.attendee
-    if _existing_registration(session, event.id, attendee.id, submission_id) is not None:
+    existing_registration = _existing_registration(session, event.id, attendee.id, submission_id)
+    if existing_registration is not None:
+        # Backfill tickets for registrations created before Phase 5 without
+        # issuing a second ticket for registrations that already have one.
+        issue_ticket_and_outbox(session, existing_registration.id, derivation_key=derivation_key)
         return _record_and_return(
             session,
             event_slug=event_slug,
@@ -323,15 +332,15 @@ def _process_new_submission(
             outcome=WebhookOutcomeCode.ALREADY_REGISTERED,
         )
 
-    session.add(
-        Registration(
-            event_id=event.id,
-            attendee_id=attendee.id,
-            source_submission_id=submission_id,
-            status=RegistrationStatus.REGISTERED,
-        )
+    registration = Registration(
+        event_id=event.id,
+        attendee_id=attendee.id,
+        source_submission_id=submission_id,
+        status=RegistrationStatus.REGISTERED,
     )
+    session.add(registration)
     session.flush()
+    issue_ticket_and_outbox(session, registration.id, derivation_key=derivation_key)
     return _record_and_return(
         session,
         event_slug=event_slug,
@@ -342,7 +351,11 @@ def _process_new_submission(
 
 
 def _resolve_post_conflict(
-    session: Session, request: RsvpWebhookRequest, digest: str
+    session: Session,
+    request: RsvpWebhookRequest,
+    digest: str,
+    *,
+    derivation_key: str,
 ) -> WebhookProcessingResult:
     """Re-read committed state after a constraint race and record a safe outcome."""
     event_slug = request.event_slug
@@ -366,9 +379,13 @@ def _resolve_post_conflict(
                 if resolution is None or resolution.attendee is None:
                     outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
                 elif (
-                    _existing_registration(session, event.id, resolution.attendee.id, submission_id)
-                    is not None
-                ):
+                    existing_registration := _existing_registration(
+                        session, event.id, resolution.attendee.id, submission_id
+                    )
+                ) is not None:
+                    issue_ticket_and_outbox(
+                        session, existing_registration.id, derivation_key=derivation_key
+                    )
                     outcome = WebhookOutcomeCode.ALREADY_REGISTERED
                 else:
                     outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
@@ -386,17 +403,23 @@ def _resolve_post_conflict(
 
 
 def process_rsvp(
-    session: Session, request: RsvpWebhookRequest, raw_body: bytes
+    session: Session,
+    request: RsvpWebhookRequest,
+    raw_body: bytes,
+    *,
+    derivation_key: str,
 ) -> WebhookProcessingResult:
     """Process one validated RSVP submission transactionally."""
     digest = payload_hash(raw_body)
     try:
         with session.begin():
-            result = _process_new_submission(session, request, digest)
+            result = _process_new_submission(
+                session, request, digest, derivation_key=derivation_key
+            )
         return result
     except IntegrityError:
         session.rollback()
-        return _resolve_post_conflict(session, request, digest)
+        return _resolve_post_conflict(session, request, digest, derivation_key=derivation_key)
 
 
 def record_validation_rejection(

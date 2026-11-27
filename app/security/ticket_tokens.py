@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import secrets
 
 _TOKEN_BYTES = 32
+_REFERENCE_BYTES = 24
+_DERIVATION_CONTEXT = b"event-ticket-token:v1:"
 
 
 def generate_ticket_token() -> str:
@@ -16,6 +19,30 @@ def generate_ticket_token() -> str:
     result of :func:`hash_ticket_token` instead.
     """
     return secrets.token_urlsafe(_TOKEN_BYTES)
+
+
+def generate_ticket_reference() -> str:
+    """Return a random public ticket reference stored in the database.
+
+    This value is an identifier, not a credential. The QR credential is derived
+    from it with :func:`derive_ticket_token` and is never persisted in raw form.
+    """
+    return secrets.token_urlsafe(_REFERENCE_BYTES)
+
+
+def derive_ticket_token(ticket_reference: str, derivation_key: str) -> str:
+    """Derive the raw QR credential from a stored reference and server key.
+
+    Derivation is deterministic so a separate email worker can recreate the raw
+    token in memory without reading it from durable storage.
+    """
+    if not isinstance(ticket_reference, str) or not ticket_reference:
+        raise ValueError("ticket_reference must be a non-empty string")
+    if not isinstance(derivation_key, str) or not derivation_key:
+        raise ValueError("derivation_key must be a non-empty string")
+    material = _DERIVATION_CONTEXT + ticket_reference.encode("utf-8")
+    digest = hmac.new(derivation_key.encode("utf-8"), material, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def hash_ticket_token(token: str) -> str:

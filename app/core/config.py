@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import re
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AppEnvironment = Literal["local", "test", "development", "staging", "production"]
@@ -76,7 +76,25 @@ class Settings(BaseSettings):
     checkin_confirm_rate_limit: int = Field(default=60, ge=1)
     admin_export_rate_limit: int = Field(default=10, ge=1)
 
-    @field_validator("service_name", "app_version", mode="before")
+    # Ticket credentials are derived in memory from a stored public reference and
+    # this server-side key. The default is local-only and rejected in production.
+    ticket_token_derivation_key: SecretStr = Field(
+        default=SecretStr("local-only-insecure-ticket-token-key-change-me")
+    )
+
+    # Resend and the ticket-email worker. The worker validates these at startup.
+    resend_api_key: SecretStr | None = None
+    resend_from_email: EmailStr | None = None
+    resend_from_name: str = Field(default="Event Management", min_length=1, max_length=100)
+    email_worker_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    email_worker_batch_size: int = Field(default=10, ge=1, le=200)
+    email_worker_max_attempts: int = Field(default=5, ge=1, le=20)
+    email_worker_lease_seconds: int = Field(default=60, ge=10, le=3600)
+    email_retry_backoff_initial_seconds: float = Field(default=30.0, gt=0)
+    email_retry_backoff_multiplier: float = Field(default=2.0, ge=1.0)
+    email_retry_backoff_max_seconds: float = Field(default=3600.0, gt=0)
+
+    @field_validator("service_name", "app_version", "resend_from_name", mode="before")
     @classmethod
     def _strip_non_empty(cls, value: object) -> object:
         if isinstance(value, str):
@@ -137,6 +155,27 @@ class Settings(BaseSettings):
             cleaned[normalized_id] = SecretStr(raw)
         return cleaned
 
+    @field_validator("ticket_token_derivation_key")
+    @classmethod
+    def _validate_ticket_token_derivation_key(cls, value: SecretStr, info: Any) -> SecretStr:
+        raw = value.get_secret_value().strip()
+        if len(raw) < 32:
+            raise ValueError("ticket_token_derivation_key must be at least 32 characters")
+        if (
+            raw == "local-only-insecure-ticket-token-key-change-me"
+            and info.data.get("app_env") == "production"
+        ):
+            raise ValueError("ticket_token_derivation_key must be overridden in production")
+        return SecretStr(raw)
+
+    @model_validator(mode="after")
+    def _validate_backoff(self) -> Settings:
+        if self.email_retry_backoff_max_seconds < self.email_retry_backoff_initial_seconds:
+            raise ValueError(
+                "email_retry_backoff_max_seconds must be >= email_retry_backoff_initial_seconds"
+            )
+        return self
+
     @field_validator("supabase_url", "supabase_jwks_url", mode="before")
     @classmethod
     def _normalize_optional_url(cls, value: object) -> object:
@@ -167,6 +206,18 @@ class Settings(BaseSettings):
     def database_url_value(self) -> str:
         """Return the raw database URL without exposing it via repr or logs."""
         return self.database_url.get_secret_value()
+
+    def ticket_token_derivation_key_value(self) -> str:
+        """Return the server-side key used to derive QR credentials in memory."""
+        return self.ticket_token_derivation_key.get_secret_value()
+
+    def resend_api_key_value(self) -> str | None:
+        """Return the Resend API key only for the worker client constructor."""
+        return self.resend_api_key.get_secret_value() if self.resend_api_key else None
+
+    def resend_from_email_value(self) -> str | None:
+        """Return the configured sender address as a plain string."""
+        return str(self.resend_from_email) if self.resend_from_email else None
 
     @property
     def jwt_issuer_value(self) -> str | None:
