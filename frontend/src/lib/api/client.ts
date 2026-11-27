@@ -3,12 +3,19 @@ import type {
   AttendanceAnalyticsResponse,
   AttendeeListParams,
   AttendeeRecord,
+  AuditLogListParams,
+  AuditLogRecord,
   CheckinResponse,
   ConfirmCheckinRequest,
   EmailAnalyticsResponse,
+  EmailDeliveryListParams,
+  EmailDeliveryRecord,
+  EmailRetryResponse,
   EventCreateRequest,
   EventRecord,
   EventUpdateRequest,
+  ExportDataset,
+  ExportFormat,
   ListEventsParams,
   OverviewAnalyticsResponse,
   Page,
@@ -45,6 +52,26 @@ export type ApiRequestOptions = {
   responseType?: "json" | "blob";
 };
 
+export type DownloadedFile = {
+  blob: Blob;
+  filename: string;
+  contentType: string | null;
+};
+
+function parseDownloadFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) {
+    return null;
+  }
+
+  const quoted = /filename="([^"]+)"/i.exec(contentDisposition);
+  if (quoted?.[1]) {
+    return quoted[1];
+  }
+
+  const unquoted = /filename=([^;]+)/i.exec(contentDisposition);
+  return unquoted?.[1]?.trim() || null;
+}
+
 function appendQueryValue(params: URLSearchParams, key: string, value: QueryParamValue) {
   if (value === null || value === undefined) {
     return;
@@ -61,7 +88,7 @@ function appendQueryValue(params: URLSearchParams, key: string, value: QueryPara
 export class ApiClient {
   constructor(private readonly getAccessToken: () => Promise<string | null>) {}
 
-  async request<T>(options: ApiRequestOptions): Promise<T> {
+  private async send(options: ApiRequestOptions): Promise<Response> {
     const params = new URLSearchParams();
 
     Object.entries(options.query ?? {}).forEach(([key, value]) => {
@@ -95,6 +122,12 @@ export class ApiClient {
       throw await ApiError.fromResponse(response);
     }
 
+    return response;
+  }
+
+  async request<T>(options: ApiRequestOptions): Promise<T> {
+    const response = await this.send(options);
+
     if (response.status === 204) {
       return undefined as T;
     }
@@ -119,6 +152,27 @@ export class ApiClient {
       responseType: "blob",
       signal,
     });
+  }
+
+  /** Downloads a backend-generated file without discarding its headers. */
+  async downloadFile(
+    path: string,
+    query?: Record<string, QueryParamValue>,
+    signal?: AbortSignal,
+  ): Promise<DownloadedFile> {
+    const response = await this.send({
+      method: "GET",
+      path,
+      query,
+      responseType: "blob",
+      signal,
+    });
+
+    return {
+      blob: await response.blob(),
+      filename: parseDownloadFilename(response.headers.get("content-disposition")) ?? "download",
+      contentType: response.headers.get("content-type"),
+    };
   }
 
   readonly events = {
@@ -295,6 +349,47 @@ export class ApiClient {
         body,
         signal,
       }),
+  };
+
+  readonly emailDeliveries = {
+    list: (slug: string, params: EmailDeliveryListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<EmailDeliveryRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/email-deliveries`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+
+    retry: (slug: string, deliveryReference: string, signal?: AbortSignal) =>
+      this.request<EmailRetryResponse>({
+        method: "POST",
+        path: `/admin/events/${encodeURIComponent(slug)}/email-deliveries/${encodeURIComponent(deliveryReference)}/retry`,
+        signal,
+      }),
+  };
+
+  readonly auditLogs = {
+    list: (slug: string, params: AuditLogListParams = {}, signal?: AbortSignal) =>
+      this.request<Page<AuditLogRecord>>({
+        method: "GET",
+        path: `/admin/events/${encodeURIComponent(slug)}/audit-logs`,
+        query: params as Record<string, QueryParamValue>,
+        signal,
+      }),
+  };
+
+  readonly exports = {
+    download: (
+      slug: string,
+      dataset: ExportDataset,
+      format: ExportFormat,
+      signal?: AbortSignal,
+    ) =>
+      this.downloadFile(
+        `/admin/events/${encodeURIComponent(slug)}/exports/${dataset}.${format}`,
+        undefined,
+        signal,
+      ),
   };
 
   readonly staff = {

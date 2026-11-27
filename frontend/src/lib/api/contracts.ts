@@ -15,7 +15,11 @@ export type CheckinOutcome =
 export type SortOrder = "asc" | "desc";
 export type AttendeeSortField = "registered_at" | "name";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed" | "dead_letter";
+export type EmailPurpose = "ticket_issued" | "ticket_reissued";
 export type AnalyticsGranularity = "day" | "week" | "month";
+export type ExportFormat = "csv" | "xlsx";
+/** Only datasets exposed by the backend export routes. */
+export type ExportDataset = "attendees" | "checkins";
 
 export type Page<T> = {
   items: T[];
@@ -125,6 +129,64 @@ export type EmailAnalyticsResponse = {
   total_deliveries: number;
   status_counts: EmailDeliveryStatusCounts;
   attempt_summary: EmailAttemptSummary;
+};
+
+/** Exact `EmailDeliveryResponse` fields from `app/schemas/admin.py`. */
+export type EmailDeliveryRecord = {
+  delivery_reference: string;
+  registration_reference: string;
+  ticket_reference: string;
+  purpose: EmailPurpose;
+  status: EmailDeliveryStatus;
+  attempts: number;
+  resend_sequence: number;
+  error_code: string | null;
+  next_attempt_at: string | null;
+  created_at: string;
+  sent_at: string | null;
+};
+
+/** Exact query parameters accepted by `GET .../email-deliveries`. */
+export type EmailDeliveryListParams = PaginationParams & {
+  status?: EmailDeliveryStatus;
+  registration_reference?: string;
+  ticket_reference?: string;
+  min_attempts?: number;
+  max_attempts?: number;
+  error_code?: string;
+  next_attempt_before?: string;
+  next_attempt_after?: string;
+};
+
+/** Exact `EmailRetryResponse` fields from `app/schemas/admin.py`. */
+export type EmailRetryResponse = {
+  delivery_reference: string;
+  registration_reference: string;
+  ticket_reference: string;
+  status: EmailDeliveryStatus;
+  resend_sequence: number;
+  previous_status: EmailDeliveryStatus;
+  message: string;
+};
+
+/** Exact `AuditLogResponse` fields from `app/schemas/admin.py`. */
+export type AuditLogRecord = {
+  audit_reference: string;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  context: Record<string, string | number | boolean | null>;
+  actor_user_id: string | null;
+  created_at: string;
+};
+
+/** Exact query parameters accepted by `GET .../audit-logs`. */
+export type AuditLogListParams = PaginationParams & {
+  action?: string;
+  actor_user_id?: string;
+  from_date?: string;
+  to_date?: string;
+  sort_order?: SortOrder;
 };
 
 /** Backend filter name is `CheckinFilterStatus`; the existing union is identical. */

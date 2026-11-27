@@ -1,7 +1,16 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, LayoutDashboard, Send, Settings2, Users } from "lucide-react";
+import {
+  Archive,
+  FileSpreadsheet,
+  LayoutDashboard,
+  Mail,
+  ScrollText,
+  Send,
+  Settings2,
+  Users,
+} from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { ConfirmationDialog } from "@/components/management/confirmation-dialog";
@@ -118,10 +127,48 @@ export default function EventDetailPage() {
 
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {[
-              { href: "attendees", label: "Attendees", description: "Search and review attendee records.", icon: Users },
-              { href: "registrations", label: "Registrations", description: "Review registrations and cancellations.", icon: LayoutDashboard },
-              { href: "tickets", label: "Tickets", description: "Revoke tickets or queue email resends.", icon: Send },
-              { href: "staff", label: "Staff access", description: "Manage event-scoped roles and memberships.", icon: Settings2 },
+              {
+                href: "attendees",
+                label: "Attendees",
+                description: "Search and review attendee records.",
+                icon: Users,
+              },
+              {
+                href: "registrations",
+                label: "Registrations",
+                description: "Review registrations and cancellations.",
+                icon: LayoutDashboard,
+              },
+              {
+                href: "tickets",
+                label: "Tickets",
+                description: "Revoke tickets or queue email resends.",
+                icon: Send,
+              },
+              {
+                href: "staff",
+                label: "Staff access",
+                description: "Manage event-scoped roles and memberships.",
+                icon: Settings2,
+              },
+              {
+                href: "email-deliveries",
+                label: "Email operations",
+                description: "Monitor outbox deliveries and retry eligible jobs.",
+                icon: Mail,
+              },
+              {
+                href: "audit-logs",
+                label: "Audit logs",
+                description: "Review redacted, read-only administrative activity.",
+                icon: ScrollText,
+              },
+              {
+                href: "exports",
+                label: "Exports",
+                description: "Download backend-generated CSV and XLSX files.",
+                icon: FileSpreadsheet,
+              },
             ].map((item) => (
               <Card key={item.href}>
                 <CardHeader>

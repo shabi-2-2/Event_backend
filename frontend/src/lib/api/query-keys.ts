@@ -41,4 +41,12 @@ export const managementKeys = {
   staffAll: (slug: string) => [...managementKeys.forEvent(slug), "staff"] as const,
   staff: (slug: string, params: Record<string, unknown> = {}) =>
     [...managementKeys.staffAll(slug), paramsKey(params)] as const,
+  emailDeliveriesAll: (slug: string) =>
+    [...managementKeys.forEvent(slug), "email-deliveries"] as const,
+  emailDeliveries: (slug: string, params: Record<string, unknown> = {}) =>
+    [...managementKeys.emailDeliveriesAll(slug), paramsKey(params)] as const,
+  auditLogsAll: (slug: string) =>
+    [...managementKeys.forEvent(slug), "audit-logs"] as const,
+  auditLogs: (slug: string, params: Record<string, unknown> = {}) =>
+    [...managementKeys.auditLogsAll(slug), paramsKey(params)] as const,
 };

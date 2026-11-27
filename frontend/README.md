@@ -79,6 +79,8 @@ See [`docs/API_CONTRACT.md`](./docs/API_CONTRACT.md) for the verified backend co
 
 The event list endpoint requires global `event.manage`, so a successful `GET /api/v1/admin/events` is used to decide whether to show event-management navigation. Roles are never inferred from JWT claims. Permissions that cannot be verified from an existing endpoint remain hidden by default. The backend validates every request against `staff_memberships`.
 
+Email operations, audit logs, and exports are linked from the relevant event detail page rather than the global shell navigation. The backend contract exposes no endpoint for resolving the current user's event-specific `email_delivery.view`, `email_delivery.manage`, `audit.view`, or `attendance.export` permissions, so the frontend cannot safely hide those links per role. They remain event-scoped links only; the backend returns `403` without the required permission. Client-side checks are never treated as security enforcement.
+
 ### Event selection
 
 The selected event slug is kept in the `?event=` query parameter. No token or session data is persisted in browser storage.

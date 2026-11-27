@@ -25,6 +25,12 @@ describe("management query keys", () => {
     expect(managementKeys.attendees("event-a")).not.toEqual(
       managementKeys.attendees("event-b"),
     );
+    expect(managementKeys.emailDeliveries("event-a")).not.toEqual(
+      managementKeys.emailDeliveries("event-b"),
+    );
+    expect(managementKeys.auditLogs("event-a")).not.toEqual(
+      managementKeys.auditLogs("event-b"),
+    );
   });
 
   it("includes filters so switching filters never reuses stale pages", () => {
@@ -53,6 +59,14 @@ describe("management query keys", () => {
     expect(managementKeys.staff("event-a", { role: "admin" })).toEqual([
       ...managementKeys.staffAll("event-a"),
       '{"role":"admin"}',
+    ]);
+    expect(managementKeys.emailDeliveries("event-a", { status: "failed" })).toEqual([
+      ...managementKeys.emailDeliveriesAll("event-a"),
+      '{"status":"failed"}',
+    ]);
+    expect(managementKeys.auditLogs("event-a", { sort_order: "asc" })).toEqual([
+      ...managementKeys.auditLogsAll("event-a"),
+      '{"sort_order":"asc"}',
     ]);
     expect(managementKeys.events({ page: 3 })).toEqual([
       ...managementKeys.eventsAll(),
