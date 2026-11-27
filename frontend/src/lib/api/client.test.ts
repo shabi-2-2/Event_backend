@@ -120,6 +120,44 @@ describe("ApiClient", () => {
     });
   });
 
+  it("posts exact verify and confirm contracts to the scanner endpoints", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const verifyResponse = {
+      success: true,
+      outcome: "valid_ticket",
+      message: "Ticket verified.",
+      ticket: null,
+    };
+    fetchMock.mockResolvedValueOnce(jsonResponse(verifyResponse));
+    fetchMock.mockResolvedValueOnce(jsonResponse(verifyResponse));
+
+    const client = new ApiClient(async () => "scanner-token");
+    const ticketToken = "raw-ticket-token-1234567890";
+
+    await client.checkins.verify("summit-2026", { ticket_token: ticketToken });
+    await client.checkins.confirm("summit-2026", {
+      ticket_token: ticketToken,
+      station: "Door 1",
+    });
+
+    const [verifyUrl, verifyInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [confirmUrl, confirmInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+
+    expect(verifyUrl).toBe("https://api.example/api/v1/events/summit-2026/checkins/verify");
+    expect(verifyInit.method).toBe("POST");
+    expect(JSON.parse(String(verifyInit.body))).toEqual({ ticket_token: ticketToken });
+
+    expect(confirmUrl).toBe("https://api.example/api/v1/events/summit-2026/checkins/confirm");
+    expect(confirmInit.method).toBe("POST");
+    expect(JSON.parse(String(confirmInit.body))).toEqual({
+      ticket_token: ticketToken,
+      station: "Door 1",
+    });
+    expect((verifyInit.headers as Headers).get("Authorization")).toBe(
+      "Bearer scanner-token",
+    );
+  });
+
   it("returns binary responses as blobs", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(

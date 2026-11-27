@@ -3,6 +3,15 @@ export type StaffRole = "admin" | "checkin" | "viewer";
 export type RegistrationStatus = "registered" | "checked_in" | "cancelled";
 export type TicketStatus = "active" | "used" | "revoked" | "expired";
 export type CheckinStatus = "pending" | "checked_in";
+export type CheckinOutcome =
+  | "valid_ticket"
+  | "checked_in"
+  | "already_checked_in"
+  | "invalid_ticket"
+  | "revoked_ticket"
+  | "expired_ticket"
+  | "registration_cancelled"
+  | "invalid_registration_state";
 export type SortOrder = "asc" | "desc";
 export type AttendeeSortField = "registered_at" | "name";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed" | "dead_letter";
@@ -241,6 +250,33 @@ export type TicketResendResponse = {
   status: EmailDeliveryStatus;
   resend_sequence: number;
   message: string;
+};
+
+/** Exact `TicketCheckRequest` body from `app/schemas/checkin.py`. */
+export type TicketCheckRequest = {
+  ticket_token: string;
+};
+
+/** Exact `ConfirmCheckinRequest` body from `app/schemas/checkin.py`. */
+export type ConfirmCheckinRequest = TicketCheckRequest & {
+  station?: string | null;
+};
+
+/** Exact `ScannerTicketInfo` fields; no email, phone, token, hash, or IDs. */
+export type ScannerTicketInfo = {
+  attendee_name: string;
+  urn: string;
+  ticket_status: TicketStatus;
+  registration_status: RegistrationStatus;
+  check_in_status: CheckinStatus;
+};
+
+/** Exact `CheckinResponse` shape from `app/schemas/checkin.py`. */
+export type CheckinResponse = {
+  success: boolean;
+  outcome: CheckinOutcome;
+  message: string;
+  ticket: ScannerTicketInfo | null;
 };
 
 export type StaffListParams = PaginationParams & {

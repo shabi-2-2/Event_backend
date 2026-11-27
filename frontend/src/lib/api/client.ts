@@ -3,6 +3,8 @@ import type {
   AttendanceAnalyticsResponse,
   AttendeeListParams,
   AttendeeRecord,
+  CheckinResponse,
+  ConfirmCheckinRequest,
   EmailAnalyticsResponse,
   EventCreateRequest,
   EventRecord,
@@ -17,6 +19,7 @@ import type {
   StaffListParams,
   StaffRecord,
   StaffRoleUpdateRequest,
+  TicketCheckRequest,
   TicketListParams,
   TicketRecord,
   TicketResendResponse,
@@ -272,6 +275,24 @@ export class ApiClient {
       this.request<TicketResendResponse>({
         method: "POST",
         path: `/admin/events/${encodeURIComponent(slug)}/tickets/${encodeURIComponent(ticketReference)}/resend`,
+        signal,
+      }),
+  };
+
+  readonly checkins = {
+    verify: (eventSlug: string, body: TicketCheckRequest, signal?: AbortSignal) =>
+      this.request<CheckinResponse>({
+        method: "POST",
+        path: `/events/${encodeURIComponent(eventSlug)}/checkins/verify`,
+        body,
+        signal,
+      }),
+
+    confirm: (eventSlug: string, body: ConfirmCheckinRequest, signal?: AbortSignal) =>
+      this.request<CheckinResponse>({
+        method: "POST",
+        path: `/events/${encodeURIComponent(eventSlug)}/checkins/confirm`,
+        body,
         signal,
       }),
   };
