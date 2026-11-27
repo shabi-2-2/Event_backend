@@ -818,7 +818,7 @@ alembic check
 alembic current
 
 # Optional: inspect the Phase 7 revision in isolation
-alembic downgrade 20261127_0002
+alembic downgrade 20261127_0003
 alembic upgrade head
 ```
 
@@ -831,6 +831,100 @@ export EVENT_DATABASE_URL='postgresql+psycopg://postgres@127.0.0.1:55432/event_t
 export EVENT_TEST_POSTGRES_URL="$EVENT_DATABASE_URL"
 python -m pytest -q
 ```
+
+## Phase 7.1: event-scoped first-year eligibility
+
+This phase adds one-event-only URN eligibility. The prepared roster was inspected
+without exposing student records: comma-delimited UTF-8/ASCII, header
+`Lead ID,URN,Name`, 130 data rows, no blank rows, one unambiguous `URN` column,
+and no source duplicates. No URN pattern is assumed by the application.
+
+### Schema and migration
+
+Revision `20261127_0004` creates `eligibility_rosters` with `id`, `event_id`
+(`RESTRICT` FK to `events.id`), `normalized_urn`, and `created_at`. A unique
+index on `(event_id, normalized_urn)` makes concurrent imports safe, and
+`(event_id, created_at)` supports paginated inspection. No name, email, phone,
+or other student PII is stored.
+
+### Normalization and matching
+
+Imports and submitted RSVPs share `app.services.urn.normalize_urn`: surrounding
+whitespace is trimmed, values are uppercased, leading zeros and punctuation are
+preserved, and empty, control-character, or values over 64 characters are
+rejected. Lookup is an exact, event-scoped equality check. There is no substring,
+fuzzy, partial, frontend, or client-flag eligibility mechanism.
+
+### Admin endpoints
+
+All endpoints require event-scoped `Permission.EVENT_MANAGE` and reject ordinary
+staff/viewers with `403` without disclosing whether another event exists.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/admin/events/{event_slug}/eligibility-roster` | Paginated roster inspection |
+| `POST` | `/api/v1/admin/events/{event_slug}/eligibility-roster/import/dry-run` | Validate and count without writes |
+| `POST` | `/api/v1/admin/events/{event_slug}/eligibility-roster/import` | Confirmed transactional import |
+
+The body is JSON with `filename` and base64-encoded `content_base64`; the
+confirmed body also requires `"confirm": true`. Uploads never create temporary
+files. Filenames are restricted to a safe, relative `.csv` basename. The default
+limits are `EVENT_ROSTER_IMPORT_MAX_UPLOAD_BYTES=1048576` and
+`EVENT_ROSTER_IMPORT_MAX_ROWS=1000`; imports share a
+`EVENT_ADMIN_ROSTER_IMPORT_RATE_LIMIT` of 5 per window. Responses contain counts
+only. The confirmed import writes a `roster.imported` audit entry with redacted
+counts; it never creates registrations, tickets, or email deliveries.
+
+### Webhook enforcement
+
+Eligibility is checked inside `process_rsvp`, after event/window checks and
+before declined handling, capacity, attendee creation, registration, ticket
+issuance, and outbox creation. It is also rechecked in the post-conflict path.
+
+| Roster match | Attendance | Result |
+|---|---|---|
+| Yes | `yes` | Existing registration and ticket workflow |
+| Yes | `no` | `declined`, no ticket |
+| No | `yes` | `ineligible`, no registration or ticket |
+| No | `no` | `ineligible`, no ticket |
+
+An ineligible submission returns `200 OK`:
+
+```json
+{
+  "success": false,
+  "outcome": "ineligible",
+  "submission_id": "form-response-000123",
+  "message": "Submission is not eligible for this event."
+}
+```
+
+The ledger records `WebhookOutcome.REJECTED` with `error_code="ineligible"` in
+the same transaction. Repeated deliveries return the existing
+`duplicate_submission` response and do not add another ledger row, registration,
+ticket, or email delivery. Ineligible submissions never consume capacity. HMAC,
+timestamp, key ID, rate limiting, advisory locks, idempotency, identity
+conflicts, lifecycle, capacity, tickets, and the outbox are unchanged.
+
+### Historical reconciliation
+
+Use the JSONL CLI with one explicit event slug. Each line contains
+`submission_id`, `name`, `email`, optional `phone`, `urn`, and `attendance`;
+original submission IDs are preserved. Dry-run processes the same services and
+rolls back every write; `--confirm` commits per record.
+
+```bash
+# Installed entry point from pyproject.toml
+event-eligibility-reconcile --input historical.jsonl --event-slug EVENT_SLUG --dry-run
+event-eligibility-reconcile --input historical.jsonl --event-slug EVENT_SLUG --confirm
+```
+
+The command prints only counts: `processed`, `eligible`, `ineligible`,
+`registered`, `declined`, `skipped`, `failed`, and per-outcome totals. It reuses
+`process_rsvp`, so eligibility, lifecycle, capacity, identity conflicts, ticket
+issuance, webhook ledger idempotency, and outbox creation follow live webhook
+rules. It never inserts tickets or delivery rows directly and never sends email.
+Conflicts are reported in counts rather than silently overwriting data.
 
 ## Monorepo layout (Phase 8 setup)
 
@@ -1007,10 +1101,11 @@ alembic downgrade base
 Revision `20261127_0001` creates all nine domain tables, their native enums,
 foreign keys, unique constraints, and indexes. Revision `20261127_0002` adds the
 `rate_limit_counters` table. Revision `20261127_0003` adds the email resend
-sequence, sequence-scoped uniqueness, and the webhook analytics index. Only
-hashed ticket tokens and webhook payload hashes are stored; raw ticket tokens and
-raw webhook payloads are never persisted. Phases 5 and 6 reused the existing
-tables and constraints without adding revisions.
+sequence, sequence-scoped uniqueness, and the webhook analytics index. Revision
+`20261127_0004` adds the event-scoped eligibility roster table and indexes
+described in Phase 7.1. Only hashed ticket tokens and webhook payload hashes are
+stored; raw ticket tokens and raw webhook payloads are never persisted. Phases 5
+and 6 reused the existing tables and constraints without adding revisions.
 
 ## Tests and quality checks
 

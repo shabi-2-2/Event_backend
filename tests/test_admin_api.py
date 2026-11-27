@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,6 +28,7 @@ from app.db.models import (
     Attendee,
     AuditLog,
     Checkin,
+    EligibilityRosterEntry,
     EmailDelivery,
     Event,
     Registration,
@@ -58,6 +61,7 @@ _CLEANUP_TABLES = (
     "tickets",
     "email_deliveries",
     "registrations",
+    "eligibility_rosters",
     "webhook_events",
     "audit_logs",
     "staff_memberships",
@@ -109,6 +113,7 @@ def _harness(
     _truncate(migrated_postgres)
     values: dict[str, object] = {
         "admin_export_rate_limit": 100,
+        "admin_roster_import_rate_limit": 100,
         "checkin_verify_rate_limit": 100,
         "checkin_confirm_rate_limit": 100,
     }
@@ -1006,3 +1011,293 @@ def test_email_monitoring_filters_and_retry(
 
     repeat = harness.client.post(_url(event.slug, f"email-deliveries/{delivery_id}/retry"))
     assert repeat.status_code == 409
+
+
+# --- Event-scoped eligibility roster ----------------------------------------------------
+
+
+def _roster_body(
+    text: str, *, filename: str = "roster.csv", confirm: bool = False
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "filename": filename,
+        "content_base64": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+    }
+    if confirm:
+        body["confirm"] = True
+    return body
+
+
+def _roster_count(factory: sessionmaker[Session], event_id: UUID | None = None) -> int:
+    with factory() as session:
+        statement = select(func.count()).select_from(EligibilityRosterEntry)
+        if event_id is not None:
+            statement = statement.where(EligibilityRosterEntry.event_id == event_id)
+        return int(session.scalar(statement) or 0)
+
+
+def test_roster_dry_run_confirmed_import_and_redacted_audit(
+    harness: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    event = _bootstrap(harness)
+    csv_text = (
+        "Lead ID,URN,Name\n"
+        "1, roster-a1 ,Alpha\n"
+        "2,ROSTER-B2,Beta\n"
+        "3,,Missing\n"
+        "4,roster-a1,Duplicate\n"
+    )
+    body = _roster_body(csv_text)
+
+    dry_run = harness.client.post(_url(event.slug, "eligibility-roster/import/dry-run"), json=body)
+    confirmed = harness.client.post(
+        _url(event.slug, "eligibility-roster/import"), json=_roster_body(csv_text, confirm=True)
+    )
+    listed = harness.client.get(_url(event.slug, "eligibility-roster"))
+
+    assert dry_run.status_code == 200
+    assert dry_run.json() == {
+        "mode": "dry_run",
+        "rows": 4,
+        "valid_unique": 2,
+        "duplicates": 1,
+        "invalid_rows": 1,
+        "already_imported": 0,
+        "imported": 0,
+        "skipped": 0,
+    }
+    assert confirmed.status_code == 201
+    assert confirmed.json() == {
+        "mode": "confirmed",
+        "rows": 4,
+        "valid_unique": 2,
+        "duplicates": 1,
+        "invalid_rows": 1,
+        "already_imported": 0,
+        "imported": 2,
+        "skipped": 0,
+    }
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 2
+    assert {item["normalized_urn"] for item in listed.json()["items"]} == {
+        "ROSTER-A1",
+        "ROSTER-B2",
+    }
+    assert _roster_count(harness.factory, event.id) == 2
+
+    with harness.factory() as session:
+        assert session.scalar(select(func.count()).select_from(Registration)) == 0
+        assert session.scalar(select(func.count()).select_from(Ticket)) == 0
+        assert session.scalar(select(func.count()).select_from(EmailDelivery)) == 0
+
+    audit = harness.client.get(_url(event.slug, "audit-logs"), params={"action": "roster.imported"})
+    assert audit.status_code == 200
+    assert audit.json()["total"] == 1
+    assert audit.json()["items"][0]["context"] == {
+        "outcome": "success",
+        "rows": 4,
+        "valid_unique": 2,
+        "duplicates": 1,
+        "invalid_rows": 1,
+        "already_imported": 0,
+        "imported": 2,
+        "skipped": 0,
+    }
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "ROSTER-A1" not in output
+    assert "ROSTER-B2" not in output
+
+
+def test_roster_dry_run_has_no_database_side_effects(harness: Harness) -> None:
+    event = _bootstrap(harness)
+    body = _roster_body("Lead ID,URN,Name\n1,DRY-RUN-URN,Ada\n")
+
+    response = harness.client.post(_url(event.slug, "eligibility-roster/import/dry-run"), json=body)
+
+    assert response.status_code == 200
+    assert response.json()["imported"] == 0
+    assert _roster_count(harness.factory) == 0
+    assert _count_audit_logs(harness.factory) == 0
+
+
+def _count_audit_logs(factory: sessionmaker[Session]) -> int:
+    with factory() as session:
+        return int(session.scalar(select(func.count()).select_from(AuditLog)) or 0)
+
+
+def test_roster_import_requires_event_admin(harness: Harness) -> None:
+    event = _bootstrap(harness, role=StaffRole.VIEWER)
+    body = _roster_body("Lead ID,URN,Name\n1,PRIVATE-URN,Ada\n", confirm=True)
+
+    listed = harness.client.get(_url(event.slug, "eligibility-roster"))
+    dry_run = harness.client.post(_url(event.slug, "eligibility-roster/import/dry-run"), json=body)
+    confirmed = harness.client.post(_url(event.slug, "eligibility-roster/import"), json=body)
+
+    assert listed.status_code == 403
+    assert dry_run.status_code == 403
+    assert confirmed.status_code == 403
+    assert _roster_count(harness.factory) == 0
+    assert _count_audit_logs(harness.factory) == 0
+
+
+def test_roster_is_event_scoped_for_admin_of_another_event(harness: Harness) -> None:
+    owned = _bootstrap(harness)
+    other = _create_event(harness.factory)
+    body = _roster_body("Lead ID,URN,Name\n1,OTHER-EVENT-URN,Ada\n", confirm=True)
+
+    denied = harness.client.post(_url(other.slug, "eligibility-roster/import"), json=body)
+    allowed = harness.client.post(_url(owned.slug, "eligibility-roster/import"), json=body)
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 201
+    assert _roster_count(harness.factory, other.id) == 0
+    assert _roster_count(harness.factory, owned.id) == 1
+
+
+def test_roster_import_normalization_duplicates_and_leading_zeros(harness: Harness) -> None:
+    event = _bootstrap(harness)
+    other = _bootstrap(harness)
+    csv_text = (
+        "Lead ID,URN,Name\n"
+        "1,  abc-001 ,Alpha\n"
+        "2,ABC-001,Duplicate\n"
+        "3,00123,Leading Zero\n"
+        "4,,Missing\n"
+    )
+
+    first = harness.client.post(
+        _url(event.slug, "eligibility-roster/import"),
+        json=_roster_body(csv_text, confirm=True),
+    )
+    second = harness.client.post(
+        _url(other.slug, "eligibility-roster/import"),
+        json=_roster_body(csv_text, confirm=True),
+    )
+    repeat = harness.client.post(
+        _url(event.slug, "eligibility-roster/import"),
+        json=_roster_body(csv_text, confirm=True),
+    )
+
+    assert first.json()["imported"] == 2
+    assert second.json()["imported"] == 2
+    assert repeat.json()["already_imported"] == 2
+    assert repeat.json()["imported"] == 0
+    assert repeat.json()["skipped"] == 2
+    assert _roster_count(harness.factory, event.id) == 2
+    assert _roster_count(harness.factory, other.id) == 2
+
+    with harness.factory() as session:
+        urns = set(
+            session.scalars(
+                select(EligibilityRosterEntry.normalized_urn).where(
+                    EligibilityRosterEntry.event_id == event.id
+                )
+            )
+        )
+    assert urns == {"ABC-001", "00123"}
+
+
+@pytest.mark.parametrize(
+    ("filename", "csv_text"),
+    [
+        ("../roster.csv", "Lead ID,URN,Name\n1,SAFE-URN,Ada\n"),
+        ("/tmp/roster.csv", "Lead ID,URN,Name\n1,SAFE-URN,Ada\n"),
+        ("roster.txt", "Lead ID,URN,Name\n1,SAFE-URN,Ada\n"),
+        ("roster.csv", "Lead ID;URN;Name\n1;SAFE-URN;Ada\n"),
+        ("roster.csv", "Lead ID,Student,Name\n1,SAFE-URN,Ada\n"),
+        ("roster.csv", "Lead ID,URN,URN\n1,SAFE-URN,OTHER\n"),
+    ],
+)
+def test_roster_import_rejects_unsafe_or_malformed_uploads(
+    harness: Harness, filename: str, csv_text: str
+) -> None:
+    event = _bootstrap(harness)
+    response = harness.client.post(
+        _url(event.slug, "eligibility-roster/import/dry-run"),
+        json=_roster_body(csv_text, filename=filename),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert _roster_count(harness.factory) == 0
+
+
+def test_roster_import_rejects_invalid_base64(harness: Harness) -> None:
+    event = _bootstrap(harness)
+    response = harness.client.post(
+        _url(event.slug, "eligibility-roster/import/dry-run"),
+        json={"filename": "roster.csv", "content_base64": "not-base64!"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_roster_import_rate_limit(
+    migrated_postgres: Engine, postgres_engine_settings: Settings
+) -> None:
+    with _harness(
+        migrated_postgres,
+        postgres_engine_settings,
+        admin_roster_import_rate_limit=1,
+    ) as limited:
+        event = _bootstrap(limited)
+        body = _roster_body("Lead ID,URN,Name\n1,RATE-LIMIT-URN,Ada\n")
+        first = limited.client.post(
+            _url(event.slug, "eligibility-roster/import/dry-run"), json=body
+        )
+        second = limited.client.post(
+            _url(event.slug, "eligibility-roster/import/dry-run"), json=body
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "TOO_MANY_REQUESTS"
+
+
+def test_roster_import_enforces_size_and_row_limits(
+    migrated_postgres: Engine, postgres_engine_settings: Settings
+) -> None:
+    with _harness(
+        migrated_postgres,
+        postgres_engine_settings,
+        roster_import_max_upload_bytes=1024,
+        roster_import_max_rows=2,
+    ) as limited:
+        event = _bootstrap(limited)
+        oversized = _roster_body(
+            "Lead ID,URN,Name\n" + "".join(f"{i},URN-{i},Name\n" for i in range(100))
+        )
+        too_many_rows = _roster_body("Lead ID,URN,Name\n1,URN-A,A\n2,URN-B,B\n3,URN-C,C\n")
+        size_response = limited.client.post(
+            _url(event.slug, "eligibility-roster/import/dry-run"), json=oversized
+        )
+        row_response = limited.client.post(
+            _url(event.slug, "eligibility-roster/import/dry-run"), json=too_many_rows
+        )
+
+    assert size_response.status_code == 422
+    assert row_response.status_code == 422
+    assert _roster_count(limited.factory) == 0
+
+
+def test_concurrent_roster_imports_are_unique(harness: Harness) -> None:
+    event = _bootstrap(harness)
+    csv_text = "Lead ID,URN,Name\n1,CONCURRENT-A,A\n2,CONCURRENT-B,B\n3,CONCURRENT-C,C\n"
+    body = _roster_body(csv_text, confirm=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda _: harness.client.post(
+                    _url(event.slug, "eligibility-roster/import"), json=body
+                ),
+                range(2),
+            )
+        )
+
+    assert all(response.status_code == 201 for response in responses)
+    assert sum(int(response.json()["imported"]) for response in responses) == 3
+    assert _roster_count(harness.factory, event.id) == 3
+    assert _count_audit_logs(harness.factory) == 2

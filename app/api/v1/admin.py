@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
 from app.db.models.common import (
     EmailDeliveryStatus,
     EventStatus,
@@ -41,6 +42,12 @@ from app.schemas.admin import (
     TicketResponse,
     ViewerAttendeeResponse,
 )
+from app.schemas.eligibility import (
+    RosterConfirmRequest,
+    RosterCsvRequest,
+    RosterEntryResponse,
+    RosterImportResponse,
+)
 from app.security.rate_limit import RateLimitScope, build_subject, enforce_rate_limit
 from app.security.rbac import (
     EventAccess,
@@ -59,6 +66,7 @@ from app.services import (
     admin_registrations,
     admin_staff,
     admin_tickets,
+    eligibility,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -669,5 +677,87 @@ def retry_email_delivery(
         session,
         event_id=access.event_id,
         delivery_reference=delivery_reference,
+        actor_user_id=access.user_id,
+    )
+
+
+# --- Event-scoped eligibility roster ----------------------------------------------------
+
+
+def _enforce_roster_import_limit(request: Request, access: EventAccess) -> None:
+    enforce_rate_limit(
+        request,
+        RateLimitScope.ADMIN_ROSTER_IMPORT,
+        build_subject("admin_roster_import", access.event_id, access.user_id),
+    )
+
+
+@router.get("/events/{event_slug}/eligibility-roster", response_model=Page[RosterEntryResponse])
+def list_eligibility_roster(
+    event_slug: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    access: EventAccess = Depends(require_permission_by_slug(Permission.EVENT_MANAGE)),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+) -> Page[RosterEntryResponse]:
+    """Return the event's normalized eligibility URN roster to administrators only."""
+
+    del event_slug
+    return eligibility.list_entries(
+        session,
+        event_id=access.event_id,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post(
+    "/events/{event_slug}/eligibility-roster/import/dry-run",
+    response_model=RosterImportResponse,
+)
+def dry_run_eligibility_roster_import(
+    event_slug: str,
+    payload: RosterCsvRequest,
+    request: Request,
+    access: EventAccess = Depends(require_permission_by_slug(Permission.EVENT_MANAGE)),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+) -> RosterImportResponse:
+    """Validate a CSV roster and return counts without writing any records."""
+
+    del event_slug
+    _enforce_roster_import_limit(request, access)
+    settings: Settings = request.app.state.settings
+    return eligibility.preview_import(
+        session,
+        event_id=access.event_id,
+        payload=payload.content_base64,
+        filename=payload.filename,
+        settings=settings,
+    )
+
+
+@router.post(
+    "/events/{event_slug}/eligibility-roster/import",
+    response_model=RosterImportResponse,
+    status_code=201,
+)
+def confirm_eligibility_roster_import(
+    event_slug: str,
+    payload: RosterConfirmRequest,
+    request: Request,
+    access: EventAccess = Depends(require_permission_by_slug(Permission.EVENT_MANAGE)),  # noqa: B008
+    session: Session = Depends(get_session),  # noqa: B008
+) -> RosterImportResponse:
+    """Import a confirmed CSV roster transactionally for one event."""
+
+    del event_slug
+    _enforce_roster_import_limit(request, access)
+    settings: Settings = request.app.state.settings
+    return eligibility.confirm_import(
+        session,
+        event_id=access.event_id,
+        payload=payload.content_base64,
+        filename=payload.filename,
+        settings=settings,
         actor_user_id=access.user_id,
     )

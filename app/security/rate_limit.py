@@ -53,6 +53,7 @@ class RateLimitScope(StrEnum):
     CHECKIN_VERIFY = "checkin_verify"
     CHECKIN_CONFIRM = "checkin_confirm"
     ADMIN_EXPORT = "admin_export"
+    ADMIN_ROSTER_IMPORT = "admin_roster_import"
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ def limit_for(settings: Settings, scope: RateLimitScope) -> int:
         RateLimitScope.CHECKIN_VERIFY: settings.checkin_verify_rate_limit,
         RateLimitScope.CHECKIN_CONFIRM: settings.checkin_confirm_rate_limit,
         RateLimitScope.ADMIN_EXPORT: settings.admin_export_rate_limit,
+        RateLimitScope.ADMIN_ROSTER_IMPORT: settings.admin_roster_import_rate_limit,
     }
     return limits[scope]
 

@@ -28,6 +28,7 @@ dependencies = [
 
 [project.scripts]
 event-email-worker = "app.workers.email_worker:main"
+event-eligibility-reconcile = "app.cli.eligibility_reconciliation:main"
 
 [project.optional-dependencies]
 dev = [

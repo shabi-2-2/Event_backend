@@ -22,7 +22,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.db.models import Attendee, EmailDelivery, Event, Registration, Ticket, WebhookEvent
+from app.db.models import (
+    Attendee,
+    EligibilityRosterEntry,
+    EmailDelivery,
+    Event,
+    Registration,
+    Ticket,
+    WebhookEvent,
+)
 from app.db.models.common import EventStatus, RegistrationStatus, WebhookOutcome
 from app.main import create_app
 from app.schemas.webhook import RsvpWebhookRequest
@@ -33,12 +41,14 @@ pytestmark = pytest.mark.postgres
 
 ENDPOINT = "/api/v1/webhooks/google-forms"
 SECRET = "phase4-webhook-test-secret"
+DEFAULT_URN = "ELIGIBLE-TEST-URN"
 
 _CLEANUP_TABLES = (
     "checkins",
     "tickets",
     "email_deliveries",
     "registrations",
+    "eligibility_rosters",
     "webhook_events",
     "audit_logs",
     "staff_memberships",
@@ -128,9 +138,20 @@ def _payload(
         "name": name,
         "email": email or f"attendee-{suffix}@example.com",
         "phone": phone,
-        "urn": urn or f"URN-{suffix}",
+        "urn": urn or DEFAULT_URN,
         "attendance": attendance,
     }
+
+
+def _seed_urn(factory: sessionmaker[Session], event_id: object, urn: str) -> None:
+    with factory() as session:
+        session.add(
+            EligibilityRosterEntry(
+                event_id=event_id,
+                normalized_urn=urn.strip().upper(),
+            )
+        )
+        session.commit()
 
 
 def _create_event(
@@ -158,6 +179,7 @@ def _create_event(
         session.add(event)
         session.commit()
         session.refresh(event)
+        _seed_urn(factory, event.id, DEFAULT_URN)
         return event
 
 
@@ -302,6 +324,7 @@ def test_existing_matching_attendee_is_reused_without_overwrite(harness: Harness
     event = _create_event(harness.factory)
     email = "matching@example.com"
     urn = "MATCH-URN"
+    _seed_urn(harness.factory, event.id, urn)
     existing = _add_attendee(harness.factory, email=email, urn=urn, name="Original Name")
     original_phone = "111"
     with harness.factory() as session:
@@ -331,6 +354,7 @@ def test_existing_matching_attendee_is_reused_without_overwrite(harness: Harness
 
 def test_urn_conflict_is_rejected(harness: Harness) -> None:
     event = _create_event(harness.factory)
+    _seed_urn(harness.factory, event.id, "CONFLICT-URN")
     _add_attendee(harness.factory, email="owner@example.com", urn="CONFLICT-URN")
 
     payload = _payload(
@@ -349,6 +373,7 @@ def test_urn_conflict_is_rejected(harness: Harness) -> None:
 
 def test_email_conflict_is_rejected(harness: Harness) -> None:
     event = _create_event(harness.factory)
+    _seed_urn(harness.factory, event.id, "NEW-URN")
     _add_attendee(harness.factory, email="taken@example.com", urn="OWNER-URN")
 
     payload = _payload(
@@ -368,6 +393,7 @@ def test_different_submission_for_registered_attendee_is_already_registered(
     harness: Harness,
 ) -> None:
     event = _create_event(harness.factory)
+    _seed_urn(harness.factory, event.id, "REPEAT-URN")
     payload = _payload(event.slug, "sub-first", email="repeat@example.com", urn="REPEAT-URN")
     assert _post(harness.client, payload).status_code == 201
 
@@ -429,9 +455,13 @@ def test_concurrent_duplicate_submissions_are_idempotent(harness: Harness) -> No
 
 def test_concurrent_registrations_respect_capacity(harness: Harness) -> None:
     event = _create_event(harness.factory, capacity=1)
+    first_urn = "CAPACITY-URN-A"
+    second_urn = "CAPACITY-URN-B"
+    _seed_urn(harness.factory, event.id, first_urn)
+    _seed_urn(harness.factory, event.id, second_urn)
     bodies = [
-        _body(_payload(event.slug, "sub-capacity-a")),
-        _body(_payload(event.slug, "sub-capacity-b")),
+        _body(_payload(event.slug, "sub-capacity-a", urn=first_urn)),
+        _body(_payload(event.slug, "sub-capacity-b", urn=second_urn)),
     ]
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -492,6 +522,28 @@ def test_concurrent_registrations_respect_capacity(harness: Harness) -> None:
                 "attendance": "yes",
             },
             "sub-empty-name",
+        ),
+        (
+            {
+                "event_slug": "event-x",
+                "submission_id": "sub-empty-urn",
+                "name": "A",
+                "email": "a@example.com",
+                "urn": "   ",
+                "attendance": "yes",
+            },
+            "sub-empty-urn",
+        ),
+        (
+            {
+                "event_slug": "event-x",
+                "submission_id": "sub-control-urn",
+                "name": "A",
+                "email": "a@example.com",
+                "urn": "BAD\nURN",
+                "attendance": "yes",
+            },
+            "sub-control-urn",
         ),
     ],
 )
@@ -585,6 +637,7 @@ def test_processing_does_not_log_personal_data_or_signature(
     harness: Harness, capsys: pytest.CaptureFixture[str]
 ) -> None:
     event = _create_event(harness.factory)
+    _seed_urn(harness.factory, event.id, "PRIVATE-URN-123")
     payload = _payload(
         event.slug,
         "sub-no-logging",
@@ -655,3 +708,121 @@ def test_rollback_leaves_no_successful_ledger_record(
     response = _post(harness.client, payload)
     assert response.status_code == 201
     assert _count(harness.factory, WebhookEvent) == 1
+
+
+def test_ineligible_yes_creates_no_registration_ticket_or_email(harness: Harness) -> None:
+    event = _create_event(harness.factory)
+    payload = _payload(
+        event.slug,
+        "sub-ineligible-yes",
+        urn="NOT-ON-ROSTER",
+    )
+
+    response = _post(harness.client, payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": False,
+        "outcome": "ineligible",
+        "submission_id": "sub-ineligible-yes",
+        "message": "Submission is not eligible for this event.",
+    }
+    assert _count(harness.factory, Registration) == 0
+    assert _count(harness.factory, Attendee) == 0
+    assert _count(harness.factory, Ticket) == 0
+    assert _count(harness.factory, EmailDelivery) == 0
+    ledger = _ledger(harness.factory, event.slug, "sub-ineligible-yes")
+    assert ledger is not None
+    assert ledger.outcome == WebhookOutcome.REJECTED
+    assert ledger.error_code == "ineligible"
+
+
+def test_ineligible_no_is_reported_as_ineligible(harness: Harness) -> None:
+    event = _create_event(harness.factory)
+    payload = _payload(
+        event.slug,
+        "sub-ineligible-no",
+        attendance="no",
+        urn="NOT-ON-ROSTER",
+    )
+
+    response = _post(harness.client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "ineligible"
+    assert "urn" not in response.text.lower()
+    assert payload["urn"] not in response.text
+    assert _count(harness.factory, Registration) == 0
+    assert _count(harness.factory, WebhookEvent) == 1
+
+
+def test_normalized_roster_match_is_exact_and_event_scoped(harness: Harness) -> None:
+    event = _create_event(harness.factory)
+    other_event = _create_event(harness.factory)
+    _seed_urn(harness.factory, event.id, "mixed-Case-URN")
+    _seed_urn(harness.factory, other_event.id, "OTHER-ONLY-URN")
+
+    response = _post(
+        harness.client,
+        _payload(event.slug, "sub-normalized", urn="  mixed-case-urn  "),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["outcome"] == "registered"
+
+
+def test_repeated_ineligible_submission_is_idempotent(harness: Harness) -> None:
+    event = _create_event(harness.factory)
+    payload = _payload(event.slug, "sub-ineligible-repeat", urn="NOT-ON-ROSTER")
+
+    first = _post(harness.client, payload)
+    second = _post(harness.client, payload)
+
+    assert first.json()["outcome"] == "ineligible"
+    assert second.status_code == 200
+    assert second.json()["outcome"] == "duplicate_submission"
+    assert _count(harness.factory, WebhookEvent) == 1
+    assert _count(harness.factory, Registration) == 0
+
+
+def test_concurrent_ineligible_submissions_are_recorded_once(harness: Harness) -> None:
+    event = _create_event(harness.factory)
+    body = _body(_payload(event.slug, "sub-ineligible-concurrent", urn="NOT-ON-ROSTER"))
+    headers = _headers(body)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda _: harness.client.post(ENDPOINT, content=body, headers=headers),
+                range(2),
+            )
+        )
+
+    assert sorted(response.json()["outcome"] for response in responses) == [
+        "duplicate_submission",
+        "ineligible",
+    ]
+    assert _count(harness.factory, WebhookEvent) == 1
+    assert _count(harness.factory, Registration) == 0
+
+
+def test_ineligible_submission_does_not_consume_capacity(harness: Harness) -> None:
+    event = _create_event(harness.factory, capacity=1)
+    existing = _add_attendee(harness.factory, email="capacity@example.com", urn="SEED-URN")
+    with harness.factory() as session:
+        session.add(
+            Registration(
+                event_id=event.id,
+                attendee_id=existing.id,
+                source_submission_id="capacity-seed",
+            )
+        )
+        session.commit()
+
+    response = _post(
+        harness.client,
+        _payload(event.slug, "sub-ineligible-capacity", urn="NOT-ON-ROSTER"),
+    )
+
+    assert response.json()["outcome"] == "ineligible"
+    assert _count(harness.factory, Registration) == 1

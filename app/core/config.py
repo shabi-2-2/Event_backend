@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     checkin_verify_rate_limit: int = Field(default=120, ge=1)
     checkin_confirm_rate_limit: int = Field(default=60, ge=1)
     admin_export_rate_limit: int = Field(default=10, ge=1)
+    admin_roster_import_rate_limit: int = Field(default=5, ge=1)
+
+    # Event-scoped eligibility roster imports. Defaults accept the inspected
+    # 130-row CSV well within conservative operational limits.
+    roster_import_max_upload_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
+    roster_import_max_rows: int = Field(default=1_000, ge=1, le=10_000)
 
     # Ticket credentials are derived in memory from a stored public reference and
     # this server-side key. The default is local-only and rejected in production.

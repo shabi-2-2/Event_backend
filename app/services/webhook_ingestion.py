@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Attendee, Event, Registration, WebhookEvent
 from app.db.models.common import EventStatus, RegistrationStatus, WebhookOutcome
 from app.schemas.webhook import AttendanceValue, RsvpWebhookRequest, WebhookOutcomeCode
+from app.services.eligibility import is_eligible
 from app.services.ticket_issuance import issue_ticket_and_outbox
 
 SOURCE = "google_forms"
@@ -33,6 +34,7 @@ _DB_OUTCOME: dict[WebhookOutcomeCode, WebhookOutcome] = {
     WebhookOutcomeCode.EVENT_UNAVAILABLE: WebhookOutcome.REJECTED,
     WebhookOutcomeCode.CAPACITY_REACHED: WebhookOutcome.REJECTED,
     WebhookOutcomeCode.IDENTITY_CONFLICT: WebhookOutcome.REJECTED,
+    WebhookOutcomeCode.INELIGIBLE: WebhookOutcome.REJECTED,
 }
 
 _MESSAGES: dict[WebhookOutcomeCode, str] = {
@@ -44,6 +46,7 @@ _MESSAGES: dict[WebhookOutcomeCode, str] = {
     WebhookOutcomeCode.EVENT_UNAVAILABLE: "Event is not accepting registrations.",
     WebhookOutcomeCode.CAPACITY_REACHED: "Event registration capacity has been reached.",
     WebhookOutcomeCode.IDENTITY_CONFLICT: "Submitted identity conflicts with an existing attendee.",
+    WebhookOutcomeCode.INELIGIBLE: "Submission is not eligible for this event.",
 }
 
 _ACTIVE_REGISTRATION_STATUSES = (
@@ -54,12 +57,18 @@ _ACTIVE_REGISTRATION_STATUSES = (
 
 @dataclass(frozen=True)
 class WebhookProcessingResult:
-    """A safe result that can be mapped directly to an HTTP response."""
+    """A safe result that can be mapped directly to an HTTP response.
+
+    ``eligible`` is internal metadata used by controlled reconciliation. It is
+    ``None`` when the roster was not reached (for example a duplicate delivery
+    or an unavailable event), so it never becomes an API response field.
+    """
 
     outcome: WebhookOutcomeCode
     submission_id: str
     message: str
     success: bool
+    eligible: bool | None = None
 
 
 def payload_hash(raw_body: bytes) -> str:
@@ -67,7 +76,12 @@ def payload_hash(raw_body: bytes) -> str:
     return hashlib.sha256(raw_body).hexdigest()
 
 
-def _result(outcome: WebhookOutcomeCode, submission_id: str) -> WebhookProcessingResult:
+def _result(
+    outcome: WebhookOutcomeCode,
+    submission_id: str,
+    *,
+    eligible: bool | None = None,
+) -> WebhookProcessingResult:
     return WebhookProcessingResult(
         outcome=outcome,
         submission_id=submission_id,
@@ -79,6 +93,7 @@ def _result(outcome: WebhookOutcomeCode, submission_id: str) -> WebhookProcessin
             WebhookOutcomeCode.DUPLICATE_SUBMISSION,
             WebhookOutcomeCode.ALREADY_REGISTERED,
         },
+        eligible=eligible,
     )
 
 
@@ -253,6 +268,7 @@ def _record_and_return(
     submission_id: str,
     digest: str,
     outcome: WebhookOutcomeCode,
+    eligible: bool | None = None,
 ) -> WebhookProcessingResult:
     _record_ledger(
         session,
@@ -261,7 +277,7 @@ def _record_and_return(
         digest=digest,
         outcome=outcome,
     )
-    return _result(outcome, submission_id)
+    return _result(outcome, submission_id, eligible=eligible)
 
 
 def _process_new_submission(
@@ -290,6 +306,20 @@ def _process_new_submission(
             outcome=WebhookOutcomeCode.EVENT_UNAVAILABLE,
         )
 
+    # Eligibility is enforced here, inside the webhook transaction and before
+    # declined handling, capacity accounting, attendee creation, registration,
+    # and ticket issuance. The backend roster is the only authority.
+    eligible = is_eligible(session, event.id, request.urn)
+    if not eligible:
+        return _record_and_return(
+            session,
+            event_slug=event_slug,
+            submission_id=submission_id,
+            digest=digest,
+            outcome=WebhookOutcomeCode.INELIGIBLE,
+            eligible=False,
+        )
+
     if request.attendance == AttendanceValue.NO:
         return _record_and_return(
             session,
@@ -297,6 +327,7 @@ def _process_new_submission(
             submission_id=submission_id,
             digest=digest,
             outcome=WebhookOutcomeCode.DECLINED,
+            eligible=True,
         )
 
     if _is_at_capacity(session, event):
@@ -306,6 +337,7 @@ def _process_new_submission(
             submission_id=submission_id,
             digest=digest,
             outcome=WebhookOutcomeCode.CAPACITY_REACHED,
+            eligible=True,
         )
 
     resolution = _resolve_attendee(session, request)
@@ -316,6 +348,7 @@ def _process_new_submission(
             submission_id=submission_id,
             digest=digest,
             outcome=WebhookOutcomeCode.IDENTITY_CONFLICT,
+            eligible=True,
         )
 
     attendee = resolution.attendee
@@ -330,6 +363,7 @@ def _process_new_submission(
             submission_id=submission_id,
             digest=digest,
             outcome=WebhookOutcomeCode.ALREADY_REGISTERED,
+            eligible=True,
         )
 
     registration = Registration(
@@ -347,6 +381,7 @@ def _process_new_submission(
         submission_id=submission_id,
         digest=digest,
         outcome=WebhookOutcomeCode.REGISTERED,
+        eligible=True,
     )
 
 
@@ -368,27 +403,32 @@ def _resolve_post_conflict(
 
             event = _get_event(session, event_slug)
             now = datetime.now(UTC)
+            eligible: bool | None = None
             if event is None or not _is_accepting_registrations(event, now=now):
                 outcome = WebhookOutcomeCode.EVENT_UNAVAILABLE
-            elif request.attendance == AttendanceValue.NO:
-                outcome = WebhookOutcomeCode.DECLINED
-            elif _is_at_capacity(session, event):
-                outcome = WebhookOutcomeCode.CAPACITY_REACHED
             else:
-                resolution = _resolve_attendee(session, request)
-                if resolution is None or resolution.attendee is None:
-                    outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
-                elif (
-                    existing_registration := _existing_registration(
-                        session, event.id, resolution.attendee.id, submission_id
-                    )
-                ) is not None:
-                    issue_ticket_and_outbox(
-                        session, existing_registration.id, derivation_key=derivation_key
-                    )
-                    outcome = WebhookOutcomeCode.ALREADY_REGISTERED
+                eligible = is_eligible(session, event.id, request.urn)
+                if not eligible:
+                    outcome = WebhookOutcomeCode.INELIGIBLE
+                elif request.attendance == AttendanceValue.NO:
+                    outcome = WebhookOutcomeCode.DECLINED
+                elif _is_at_capacity(session, event):
+                    outcome = WebhookOutcomeCode.CAPACITY_REACHED
                 else:
-                    outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
+                    resolution = _resolve_attendee(session, request)
+                    if resolution is None or resolution.attendee is None:
+                        outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
+                    elif (
+                        existing_registration := _existing_registration(
+                            session, event.id, resolution.attendee.id, submission_id
+                        )
+                    ) is not None:
+                        issue_ticket_and_outbox(
+                            session, existing_registration.id, derivation_key=derivation_key
+                        )
+                        outcome = WebhookOutcomeCode.ALREADY_REGISTERED
+                    else:
+                        outcome = WebhookOutcomeCode.IDENTITY_CONFLICT
 
             return _record_and_return(
                 session,
@@ -396,6 +436,7 @@ def _resolve_post_conflict(
                 submission_id=submission_id,
                 digest=digest,
                 outcome=outcome,
+                eligible=eligible,
             )
     except IntegrityError:
         session.rollback()

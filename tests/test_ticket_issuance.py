@@ -22,7 +22,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.db.models import Attendee, EmailDelivery, Event, Registration, Ticket, WebhookEvent
+from app.db.models import (
+    Attendee,
+    EligibilityRosterEntry,
+    EmailDelivery,
+    Event,
+    Registration,
+    Ticket,
+    WebhookEvent,
+)
 from app.db.models.common import EmailDeliveryStatus, EmailPurpose, EventStatus
 from app.main import create_app
 from app.schemas.webhook import RsvpWebhookRequest
@@ -34,11 +42,13 @@ pytestmark = pytest.mark.postgres
 
 ENDPOINT = "/api/v1/webhooks/google-forms"
 SECRET = "phase5-ticket-test-secret"
+TICKET_URN = "TICKET-ELIGIBLE-URN"
 _CLEANUP_TABLES = (
     "checkins",
     "tickets",
     "email_deliveries",
     "registrations",
+    "eligibility_rosters",
     "webhook_events",
     "audit_logs",
     "staff_memberships",
@@ -105,7 +115,7 @@ def _payload(submission_id: str) -> dict[str, Any]:
         "name": "Ada Lovelace",
         "email": f"ada-{suffix}@example.com",
         "phone": None,
-        "urn": f"URN-{suffix}",
+        "urn": TICKET_URN,
         "attendance": "yes",
     }
 
@@ -124,6 +134,8 @@ def _create_event(factory: sessionmaker[Session], slug: str) -> Event:
         session.add(event)
         session.commit()
         session.refresh(event)
+        session.add(EligibilityRosterEntry(event_id=event.id, normalized_urn=TICKET_URN))
+        session.commit()
         return event
 
 

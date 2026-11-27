@@ -6,6 +6,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.services.urn import normalize_urn
+
 
 class AttendanceValue(StrEnum):
     YES = "yes"
@@ -23,6 +25,7 @@ class WebhookOutcomeCode(StrEnum):
     EVENT_UNAVAILABLE = "event_unavailable"
     CAPACITY_REACHED = "capacity_reached"
     IDENTITY_CONFLICT = "identity_conflict"
+    INELIGIBLE = "ineligible"
 
 
 class RsvpWebhookRequest(BaseModel):
@@ -64,7 +67,7 @@ class RsvpWebhookRequest(BaseModel):
     @field_validator("urn")
     @classmethod
     def _normalize_urn(cls, value: str) -> str:
-        return value.upper()
+        return normalize_urn(value)
 
 
 class WebhookResponse(BaseModel):

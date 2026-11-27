@@ -34,6 +34,13 @@ _CONTEXT_ALLOWED_KEYS = frozenset(
         "previous_status",
         "status",
         "ticket_revoked",
+        "rows",
+        "valid_unique",
+        "duplicates",
+        "invalid_rows",
+        "already_imported",
+        "imported",
+        "skipped",
     }
 )
 _CONTEXT_FORBIDDEN_KEYS = frozenset(

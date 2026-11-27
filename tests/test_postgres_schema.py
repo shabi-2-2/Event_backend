@@ -71,7 +71,7 @@ def _expect_integrity_error(session: Session) -> None:
 def test_migration_revision_is_applied(migrated_postgres: Engine) -> None:
     with migrated_postgres.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20261127_0003"
+    assert revision == "20261127_0004"
 
 
 def test_native_enums_and_jsonb_columns_exist(migrated_postgres: Engine) -> None:
